@@ -340,6 +340,54 @@ Returns per-pod time-series of inference health sampled every 60s (in-memory, de
 
 `lastIssue` is the Unix timestamp of the most recent sample in the window where the pod was offline, had `waiting > 0`, `preemptions > 0`, or KV cache ≥ 85%; `0` means no issues in the window.
 
+### Get LiteLLM Gateway Health
+
+```http
+GET /api/v1/serving/gateway
+```
+
+Discovers in-cluster LiteLLM proxy pods (container image or command contains `litellm`) and scrapes each replica's `/metrics`. Aggregates the fleet: counters/gauges are summed, latency quantiles take the worst case across replicas, and rates are derived from counter diffs (nil until the second sample, clamped to 0 on counter reset). Results are cached 15s server-side.
+
+**Response**:
+```json
+{
+  "gateway": {
+    "pods": 2,
+    "online": true,
+    "inFlightRequests": 8,
+    "admissionQueued": 3,
+    "admissionRejected": 3,
+    "totalRequests": 170,
+    "failedRequests": 5,
+    "errorRatePct": 2.9,
+    "requestsPerSec": 0.42,
+    "e2eP95Seconds": 8.6,
+    "ttftP95Seconds": 1.8,
+    "queueTimeP95Seconds": 0.05,
+    "overheadP95Seconds": 0.02,
+    "spend": 2.05,
+    "models": [
+      {
+        "model": "gpt-4o",
+        "requestsTotal": 130,
+        "failedRequests": 1,
+        "errorRatePct": 0.8,
+        "requestsPerSec": 0.3,
+        "tokensPerSec": 420.5,
+        "e2eP95Seconds": 8.6,
+        "ttftP95Seconds": 1.8,
+        "spend": 1.55
+      }
+    ]
+  }
+}
+```
+
+- `gateway: null` when no LiteLLM proxy pod is detected — the frontend hides the Gateway card.
+- `authError` (instead of metrics) when `/metrics` returns 401/403: set `LITELLM_METRICS_API_KEY` to the gateway's metrics admin key (LiteLLM has required auth on `/metrics` since v1.85.0).
+- `overheadP95Seconds` is the gateway's own processing time (routing/auth/billing) — high relative to `e2eP95Seconds` means the gateway, not the model, is the bottleneck.
+- `spend` is cumulative USD attributed by the gateway (resets when the gateway restarts).
+
 ### Analyze Workloads
 
 ```http

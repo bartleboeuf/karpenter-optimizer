@@ -132,3 +132,95 @@ func TestGetNodePlacementHostname(t *testing.T) {
 		t.Errorf("worker-a Hostname = %q, want worker-a (fallback to node name)", workerA.Hostname)
 	}
 }
+
+func TestFindLiteLLMPods(t *testing.T) {
+	t.Parallel()
+
+	// #given: one pod matched by image (with explicit port), one by command
+	// (port falls back to 4000), one vLLM pod (not a gateway), one pending
+	// pod (skipped).
+	litellmImage := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "litellm-proxy-0", Namespace: "ai"},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+			Containers: []corev1.Container{{
+				Name:  "proxy",
+				Image: "ghcr.io/berriai/litellm:main-latest",
+				Ports: []corev1.ContainerPort{{ContainerPort: 4000}},
+			}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.1.5"},
+	}
+	litellmCmd := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "litellm-cmd", Namespace: "ai"},
+		Spec: corev1.PodSpec{
+			NodeName: "node-2",
+			Containers: []corev1.Container{{
+				Name:    "proxy",
+				Image:   "python:3.11-slim",
+				Command: []string{"litellm"},
+				Args:    []string{"--config", "/app/config.yaml"},
+			}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.1.6"},
+	}
+	vllmPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "vllm", Namespace: "ai"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "main",
+				Image: "vllm/vllm-openai:latest",
+				Ports: []corev1.ContainerPort{{ContainerPort: 8000}},
+			}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.1.7"},
+	}
+	pendingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "litellm-pending", Namespace: "ai"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "proxy", Image: "ghcr.io/berriai/litellm:main-latest"}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+
+	clientset := fake.NewClientset(litellmImage, litellmCmd, vllmPod, pendingPod)
+	c := &Client{clientset: clientset, debug: false}
+
+	// #when
+	pods, err := c.FindLiteLLMPods(context.Background())
+	if err != nil {
+		t.Fatalf("FindLiteLLMPods() error = %v", err)
+	}
+
+	// #then: only the two LiteLLM pods, with the right ports.
+	if len(pods) != 2 {
+		t.Fatalf("expected 2 LiteLLM pods, got %d: %+v", len(pods), pods)
+	}
+	byName := map[string]LiteLLMPodInfo{}
+	for _, p := range pods {
+		byName[p.Name] = p
+	}
+	if p, ok := byName["litellm-proxy-0"]; !ok {
+		t.Fatal("expected to find litellm-proxy-0")
+	} else {
+		if p.Port != 4000 {
+			t.Errorf("litellm-proxy-0 Port = %d, want 4000", p.Port)
+		}
+		if p.IP != "10.0.1.5" {
+			t.Errorf("litellm-proxy-0 IP = %q, want 10.0.1.5", p.IP)
+		}
+	}
+	if p, ok := byName["litellm-cmd"]; !ok {
+		t.Fatal("expected to find litellm-cmd (command marker)")
+	} else {
+		if p.Port != 4000 {
+			t.Errorf("litellm-cmd Port = %d, want default 4000", p.Port)
+		}
+	}
+	if _, ok := byName["vllm"]; ok {
+		t.Error("vllm pod must not be matched as a LiteLLM gateway")
+	}
+	if _, ok := byName["litellm-pending"]; ok {
+		t.Error("non-running pod must be skipped")
+	}
+}

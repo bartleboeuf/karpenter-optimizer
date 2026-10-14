@@ -72,7 +72,6 @@ func TestParsePrometheusFixture(t *testing.T) {
 	t.Parallel()
 
 	gauges, counters, histograms := splitSamples(parsePrometheus(vllmMetricsFixture))
-
 	if got, ok := gaugeValue(gauges, "num_requests_running"); !ok || got != 3 {
 		t.Errorf("num_requests_running = %v (ok=%v), want 3", got, ok)
 	}
@@ -92,26 +91,26 @@ func TestParsePrometheusFixture(t *testing.T) {
 		t.Errorf("num_requests_total = %v (ok=%v), want 120", got, ok)
 	}
 	// TTFT mean = sum/count = 18/60 = 0.3
-	if mean, ok := histogramMean(histograms, "time_to_first_token_seconds"); !ok {
+	if mean, ok := histogramMean(histogramVariants(histograms, "time_to_first_token_seconds")); !ok {
 		t.Error("time_to_first_token_seconds: expected histogram, got none")
 	} else if mean < 0.29 || mean > 0.31 {
 		t.Errorf("TTFT mean = %v, want ~0.3", mean)
 	}
 	// TTFT p95: target = 0.95*60 = 57 -> falls in the le=0.5 bucket (55) ...
 	// 57 > 55 so it lands in le=1.0 (58): interpolate between 0.5 and 1.0.
-	if p95, ok := histogramQuantile(histograms, "time_to_first_token_seconds", 0.95); !ok {
+	if p95, ok := histogramQuantile(histogramVariants(histograms, "time_to_first_token_seconds"), 0.95); !ok {
 		t.Error("TTFT p95: expected quantile, got none")
 	} else if p95 <= 0.5 || p95 >= 1.0 {
 		t.Errorf("TTFT p95 = %v, want within (0.5, 1.0)", p95)
 	}
 	// E2E latency mean = 150/60 = 2.5
-	if mean, ok := histogramMean(histograms, "e2e_request_latency_seconds"); !ok {
+	if mean, ok := histogramMean(histogramVariants(histograms, "e2e_request_latency_seconds")); !ok {
 		t.Error("e2e_request_latency_seconds: expected histogram, got none")
 	} else if mean < 2.49 || mean > 2.51 {
 		t.Errorf("E2E mean = %v, want ~2.5", mean)
 	}
 	// E2E p95: target = 57 -> lands in le=5.0 (58), interpolate 1.0..5.0
-	if p95, ok := histogramQuantile(histograms, "e2e_request_latency_seconds", 0.95); !ok {
+	if p95, ok := histogramQuantile(histogramVariants(histograms, "e2e_request_latency_seconds"), 0.95); !ok {
 		t.Error("E2E p95: expected quantile, got none")
 	} else if p95 <= 1.0 || p95 >= 5.0 {
 		t.Errorf("E2E p95 = %v, want within (1.0, 5.0)", p95)
@@ -242,5 +241,52 @@ func TestProbeOffline(t *testing.T) {
 	}
 	if h.Error == "" {
 		t.Error("expected an error message for an offline pod")
+	}
+}
+
+const multiModelMetricsFixture = `# TYPE litellm_proxy_total_requests_metric counter
+litellm_proxy_total_requests_metric{model="gpt-4o",api_key="A"} 100
+litellm_proxy_total_requests_metric{model="qwen3-30b",api_key="A"} 40
+# TYPE litellm_proxy_failed_requests_metric counter
+litellm_proxy_failed_requests_metric{model="qwen3-30b",api_key="A"} 4
+# TYPE litellm_request_total_latency_metric histogram
+litellm_request_total_latency_metric_bucket{model="gpt-4o",le="1.0"} 60
+litellm_request_total_latency_metric_bucket{model="gpt-4o",le="10.0"} 100
+litellm_request_total_latency_metric_bucket{model="gpt-4o",le="+Inf"} 100
+litellm_request_total_latency_metric_sum{model="gpt-4o"} 900
+litellm_request_total_latency_metric_count{model="gpt-4o"} 100
+litellm_request_total_latency_metric_bucket{model="qwen3-30b",le="1.0"} 10
+litellm_request_total_latency_metric_bucket{model="qwen3-30b",le="10.0"} 40
+litellm_request_total_latency_metric_bucket{model="qwen3-30b",le="+Inf"} 40
+litellm_request_total_latency_metric_sum{model="qwen3-30b"} 120
+litellm_request_total_latency_metric_count{model="qwen3-30b"} 40
+`
+
+func TestMetricsFacadeByLabel(t *testing.T) {
+	t.Parallel()
+
+	m := ParsePrometheus(multiModelMetricsFixture)
+
+	if models := m.LabelValues("litellm_proxy_total_requests_metric", "model"); len(models) != 2 || models[0] != "gpt-4o" || models[1] != "qwen3-30b" {
+		t.Errorf("LabelValues(model) = %v, want [gpt-4o qwen3-30b]", models)
+	}
+	if got, ok := m.TotalByLabel("litellm_proxy_total_requests_metric", "model", "qwen3-30b"); !ok || got != 40 {
+		t.Errorf("total requests qwen3-30b = %v (ok=%v), want 40", got, ok)
+	}
+	if got, ok := m.TotalByLabel("litellm_proxy_failed_requests_metric", "model", "qwen3-30b"); !ok || got != 4 {
+		t.Errorf("failed requests qwen3-30b = %v (ok=%v), want 4", got, ok)
+	}
+	if got, ok := m.Total("litellm_proxy_total_requests_metric"); !ok || got != 140 {
+		t.Errorf("total requests (all) = %v (ok=%v), want 140", got, ok)
+	}
+	// qwen3-30b p95: target = 0.95*40 = 38 -> le=1.0 has 10, le=10.0 has 40:
+	// interpolate 1.0..10.0 at (38-10)/(40-10) => ~9.3
+	if p95, ok := m.HistogramQuantileByLabel("litellm_request_total_latency_metric", "model", "qwen3-30b", 0.95); !ok {
+		t.Fatal("qwen3-30b latency p95: expected quantile, got none")
+	} else if p95 <= 1.0 || p95 >= 10.0 {
+		t.Errorf("qwen3-30b latency p95 = %v, want within (1.0, 10.0)", p95)
+	}
+	if p95, ok := m.HistogramQuantileByLabel("litellm_request_total_latency_metric", "model", "nope", 0.95); ok {
+		t.Errorf("unknown model p95: expected none, got %v", p95)
 	}
 }

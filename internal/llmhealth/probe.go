@@ -229,16 +229,16 @@ func (p *Prober) applyVLLMMetrics(h *PodHealth, samples []promSample) {
 	if v, ok := counterValue(counters, "num_preemptions_total"); ok {
 		h.Preemptions = int64(v)
 	}
-	if mean, ok := histogramMean(histograms, "time_to_first_token_seconds"); ok {
+	if mean, ok := histogramMean(histogramVariants(histograms, "time_to_first_token_seconds")); ok {
 		h.TTFTSeconds = &mean
-		if p95, ok := histogramQuantile(histograms, "time_to_first_token_seconds", 0.95); ok {
+		if p95, ok := histogramQuantile(histogramVariants(histograms, "time_to_first_token_seconds"), 0.95); ok {
 			h.TTFTP95Seconds = &p95
 		}
 	}
 	// End-to-end request latency (whole request, not just first token).
-	if mean, ok := histogramMean(histograms, "e2e_request_latency_seconds"); ok {
+	if mean, ok := histogramMean(histogramVariants(histograms, "e2e_request_latency_seconds")); ok {
 		h.E2ESeconds = &mean
-		if p95, ok := histogramQuantile(histograms, "e2e_request_latency_seconds", 0.95); ok {
+		if p95, ok := histogramQuantile(histogramVariants(histograms, "e2e_request_latency_seconds"), 0.95); ok {
 			h.E2EP95Seconds = &p95
 		}
 	}
@@ -352,8 +352,9 @@ func normalizeName(name string) string {
 }
 
 type namedValue struct {
-	name  string
-	value float64
+	name   string
+	labels map[string]string
+	value  float64
 }
 
 type bucket struct {
@@ -367,51 +368,97 @@ type histogram struct {
 	count   float64
 }
 
+// labelKey is a canonical key for a label set (sorted "k=v" pairs, minus the
+// histogram-specific "le" label), so all series of one label variant map to
+// the same histogram.
+func labelKey(labels map[string]string) string {
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		if k == "le" {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(k)
+		sb.WriteByte('=')
+		sb.WriteString(labels[k])
+	}
+	return sb.String()
+}
+
 // splitSamples groups raw samples into plain gauges/counters and histograms.
 // Histogram series are split: `_bucket` lines become cumulative buckets, and
-// `_sum`/`_count` lines feed the mean.
+// `_sum`/`_count` lines feed the mean. One histogram is kept per label
+// variant (e.g. per model) so quantiles are computed per series, not on
+// merged buckets.
 func splitSamples(samples []promSample) (
 	gauges map[string][]namedValue,
 	counters map[string][]namedValue,
-	histograms map[string]*histogram,
+	histograms map[string]map[string]*histogram,
 ) {
 	gauges = map[string][]namedValue{}
 	counters = map[string][]namedValue{}
-	histograms = map[string]*histogram{}
+	histograms = map[string]map[string]*histogram{}
 	for _, s := range samples {
 		if base, isBucket := strings.CutSuffix(s.name, "_bucket"); isBucket {
 			le, ok := leFromLabels(s.labels)
 			if !ok {
 				continue
 			}
-			h := histograms[base]
+			byLabel := histograms[base]
+			if byLabel == nil {
+				byLabel = map[string]*histogram{}
+				histograms[base] = byLabel
+			}
+			lk := labelKey(s.labels)
+			h := byLabel[lk]
 			if h == nil {
 				h = &histogram{}
-				histograms[base] = h
+				byLabel[lk] = h
 			}
 			h.buckets = append(h.buckets, bucket{le: le, count: s.value})
 			continue
 		}
 		if base, isAgg := strings.CutSuffix(s.name, "_sum"); isAgg {
-			if h := histograms[base]; h != nil {
-				h.sum = s.value
-			} else {
-				histograms[base] = &histogram{sum: s.value}
+			byLabel := histograms[base]
+			if byLabel == nil {
+				byLabel = map[string]*histogram{}
+				histograms[base] = byLabel
 			}
+			lk := labelKey(s.labels)
+			h := byLabel[lk]
+			if h == nil {
+				h = &histogram{}
+				byLabel[lk] = h
+			}
+			h.sum = s.value
 			continue
 		}
 		if base, isCount := strings.CutSuffix(s.name, "_count"); isCount {
-			if h := histograms[base]; h != nil {
-				h.count = s.value
-			} else {
-				histograms[base] = &histogram{count: s.value}
+			byLabel := histograms[base]
+			if byLabel == nil {
+				byLabel = map[string]*histogram{}
+				histograms[base] = byLabel
 			}
+			lk := labelKey(s.labels)
+			h := byLabel[lk]
+			if h == nil {
+				h = &histogram{}
+				byLabel[lk] = h
+			}
+			h.count = s.value
 			continue
 		}
 		if strings.HasSuffix(s.name, "_total") {
-			counters[s.name] = append(counters[s.name], namedValue{s.name, s.value})
+			counters[s.name] = append(counters[s.name], namedValue(s))
 		} else {
-			gauges[s.name] = append(gauges[s.name], namedValue{s.name, s.value})
+			gauges[s.name] = append(gauges[s.name], namedValue(s))
 		}
 	}
 	return
@@ -457,21 +504,61 @@ func leFromLabels(labels map[string]string) (float64, bool) {
 	return v, true
 }
 
-func histogramMean(histograms map[string]*histogram, name string) (float64, bool) {
-	h, ok := histograms[name]
-	if !ok || h == nil || h.count <= 0 {
-		return 0, false
+// histogramVariants flattens one metric's per-label-variant histograms into a
+// slice.
+func histogramVariants(byName map[string]map[string]*histogram, name string) []*histogram {
+	var out []*histogram
+	for _, h := range byName[name] {
+		if h != nil {
+			out = append(out, h)
+		}
 	}
-	return h.sum / h.count, true
+	return out
 }
 
-// histogramQuantile estimates a quantile from cumulative histogram buckets via
-// linear interpolation between the bracketing boundaries.
-func histogramQuantile(histograms map[string]*histogram, name string, q float64) (float64, bool) {
-	h, ok := histograms[name]
-	if !ok || h == nil || len(h.buckets) == 0 {
+// histogramMean returns the weighted mean across all histogram variants
+// (total sum / total count), so multi-variant metrics (e.g. per model) are
+// combined correctly.
+func histogramMean(hs []*histogram) (float64, bool) {
+	var sum, count float64
+	for _, h := range hs {
+		if h == nil || h.count <= 0 {
+			continue
+		}
+		sum += h.sum
+		count += h.count
+	}
+	if count <= 0 {
 		return 0, false
 	}
+	return sum / count, true
+}
+
+// histogramQuantile estimates a quantile across all histogram variants: for
+// each quantile point it takes the max over variants (conservative for
+// latency). Single-variant metrics behave as before.
+func histogramQuantile(hs []*histogram, q float64) (float64, bool) {
+	var out float64
+	found := false
+	for _, h := range hs {
+		if h == nil || len(h.buckets) == 0 {
+			continue
+		}
+		v, ok := histogramVariantQuantile(h, q)
+		if !ok {
+			continue
+		}
+		if !found || v > out {
+			out = v
+			found = true
+		}
+	}
+	return out, found
+}
+
+// histogramVariantQuantile estimates a quantile from one variant's cumulative
+// buckets via linear interpolation between the bracketing boundaries.
+func histogramVariantQuantile(h *histogram, q float64) (float64, bool) {
 	bs := append([]bucket(nil), h.buckets...)
 	sort.Slice(bs, func(i, j int) bool { return bs[i].le < bs[j].le })
 	total := bs[len(bs)-1].count
@@ -488,7 +575,15 @@ func histogramQuantile(histograms map[string]*histogram, name string, q float64)
 				prevCount = bs[i-1].count
 			}
 			if b.count <= prevCount {
+				if b.le >= 1e100 {
+					return prevLe, true
+				}
 				return b.le, true
+			}
+			// The +Inf bucket ("le" encoded as 1e308) has no upper boundary to
+			// interpolate against: report the previous finite boundary.
+			if b.le >= 1e100 {
+				return prevLe, true
 			}
 			frac := (target - prevCount) / (b.count - prevCount)
 			if frac < 0 {

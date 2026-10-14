@@ -17,6 +17,9 @@ type Config struct {
 	LLMAPIKey    string
 	LLMAWSRegion string // AWS region override for the Bedrock provider (optional)
 	LLMMaxTokens int    // Response token cap for the Bedrock provider (0 = model default)
+	// LiteLLM gateway metrics auth: Bearer key for the proxy's /metrics
+	// endpoint (required by LiteLLM >= v1.85.0). Empty = unauthenticated.
+	LiteLLMMetricsAPIKey string
 	// Legacy Ollama configuration (for backward compatibility)
 	OllamaURL   string
 	OllamaModel string
@@ -82,23 +85,24 @@ func Load() *Config {
 	}
 
 	return &Config{
-		KubeconfigPath:    getEnv("KUBECONFIG", ""),
-		KubeContext:       getEnv("KUBE_CONTEXT", ""),
-		APIPort:           getEnv("PORT", "8080"),
-		LLMProvider:       llmProvider,
-		LLMURL:            llmURL,
-		LLMModel:          llmModel,
-		LLMAPIKey:         llmAPIKey,
-		LLMAWSRegion:      getEnv("LLM_AWS_REGION", ""),
-		LLMMaxTokens:      getEnvInt("LLM_MAX_TOKENS", 0),
-		OllamaURL:         ollamaURL, // Keep for backward compatibility
-		OllamaModel:       ollamaModel,
-		AWSRegion:         getEnv("AWS_REGION", "eu-west-1"),
-		AWSAccessKeyID:    getEnv("AWS_ACCESS_KEY_ID", ""),
-		AWSSecretAccessKey: getEnv("AWS_SECRET_ACCESS_KEY", ""),
-		AWSSessionToken:   getEnv("AWS_SESSION_TOKEN", ""),
-		AgentHistoryFile:  getEnv("AGENT_HISTORY_FILE", "/tmp/karpenter-optimizer-history.json"),
-		Debug:             getEnvBool("DEBUG", false),
+		KubeconfigPath:       getEnv("KUBECONFIG", ""),
+		KubeContext:          getEnv("KUBE_CONTEXT", ""),
+		APIPort:              getEnv("PORT", "8080"),
+		LLMProvider:          llmProvider,
+		LLMURL:               llmURL,
+		LLMModel:             llmModel,
+		LLMAPIKey:            llmAPIKey,
+		LLMAWSRegion:         getEnv("LLM_AWS_REGION", ""),
+		LLMMaxTokens:         getEnvInt("LLM_MAX_TOKENS", 0),
+		LiteLLMMetricsAPIKey: getEnv("LITELLM_METRICS_API_KEY", ""),
+		OllamaURL:            ollamaURL, // Keep for backward compatibility
+		OllamaModel:          ollamaModel,
+		AWSRegion:            getEnv("AWS_REGION", "eu-west-1"),
+		AWSAccessKeyID:       getEnv("AWS_ACCESS_KEY_ID", ""),
+		AWSSecretAccessKey:   getEnv("AWS_SECRET_ACCESS_KEY", ""),
+		AWSSessionToken:      getEnv("AWS_SESSION_TOKEN", ""),
+		AgentHistoryFile:     getEnv("AGENT_HISTORY_FILE", "/tmp/karpenter-optimizer-history.json"),
+		Debug:                getEnvBool("DEBUG", false),
 	}
 }
 

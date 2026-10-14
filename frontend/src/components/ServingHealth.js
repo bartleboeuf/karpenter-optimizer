@@ -650,6 +650,107 @@ function MetricExplainer() {
   );
 }
 
+// GatewayCard renders aggregated LiteLLM AI-gateway health: a row of stat
+// tiles (in-flight, admission queue, 503 rejections, error rate, E2E p95,
+// gateway overhead p95, requests/s) and a per-model breakdown table. When the
+// gateway's /metrics requires auth it shows an actionable 401 hint instead of
+// the numbers.
+function GatewayCard({ gateway }) {
+  if (!gateway) return null;
+
+  // Offline (no reachable replica / auth failure): a single slim banner.
+  if (!gateway.online) {
+    const msg = gateway.authError || gateway.error;
+    if (!msg) return null;
+    const isAuth = Boolean(gateway.authError);
+    return (
+      <div
+        className={cn(
+          'mb-4 rounded-md border px-3 py-2 text-xs flex items-start gap-2',
+          isAuth ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-red-200 bg-red-50 text-red-700'
+        )}
+      >
+        <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+        <span>
+          <span className="font-semibold">LiteLLM gateway: </span>
+          {msg}
+        </span>
+      </div>
+    );
+  }
+
+  const tiles = [
+    { label: 'In-flight', tip: 'Requests currently being processed by the gateway across all replicas.', value: gateway.inFlightRequests, num: true },
+    { label: 'Queued', tip: 'Requests held in the gateway admission queue, waiting to be forwarded to a backend. Consistently > 0 means backends can\'t keep up.', value: gateway.admissionQueued, num: true, warn: (gateway.admissionQueued ?? 0) > 0 },
+    { label: '503 rejections', tip: 'Requests rejected with HTTP 503 by the gateway admission control (rate/limit exceeded).', value: gateway.admissionRejected, num: true, warn: (gateway.admissionRejected ?? 0) > 0 },
+    { label: 'Error rate', tip: 'Share of total requests that failed, across all models.', value: gateway.errorRatePct !== null && gateway.errorRatePct !== undefined ? `${gateway.errorRatePct.toFixed(1)}%` : 'n/a', warn: (gateway.errorRatePct ?? 0) >= 5 },
+    { label: 'E2E p95', tip: '95th-percentile end-to-end request latency (model inference + gateway). Worst case across replicas.', value: gateway.e2eP95Seconds != null ? `${gateway.e2eP95Seconds.toFixed(2)}s` : 'n/a' },
+    { label: 'Overhead p95', tip: '95th-percentile time the gateway itself spent processing a request (routing/auth/billing), excluding model inference. High values point at the gateway, not the model.', value: gateway.overheadP95Seconds != null ? `${gateway.overheadP95Seconds.toFixed(3)}s` : 'n/a' },
+    { label: 'Requests/s', tip: 'Gateway-wide request rate, derived from counter diffs between probes.', value: gateway.requestsPerSec != null ? gateway.requestsPerSec.toFixed(1) : 'n/a' },
+  ];
+
+  return (
+    <div className="mb-4 rounded-md border border-purple-200 bg-purple-50/40 p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <Server className="h-4 w-4 text-purple-600" />
+        <span className="text-sm font-semibold text-purple-800">LiteLLM Gateway</span>
+        <Badge variant="outline" className="text-[10px]">{gateway.pods} replica{gateway.pods === 1 ? '' : 's'}</Badge>
+        {gateway.spend != null && (
+          <Badge variant="secondary" className="text-[10px]" title="Cumulative spend attributed by the gateway (USD)">
+            ${gateway.spend.toFixed(2)}
+          </Badge>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 mb-3">
+        {tiles.map((t) => (
+          <div key={t.label} className="rounded-md bg-white/70 border border-purple-100 py-2 text-center">
+            <p className="text-[11px] text-muted-foreground flex items-center justify-center gap-1">
+              <span className="cursor-help border-b border-dotted border-muted-foreground/40" title={t.tip}>{t.label}</span>
+            </p>
+            <p className={cn('text-base font-bold font-mono', t.warn && 'text-amber-600')}>{t.value ?? 0}</p>
+          </div>
+        ))}
+      </div>
+
+      {(gateway.models || []).length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-muted-foreground border-b border-purple-200">
+                <th className="py-1 pr-2">Model</th>
+                <th className="py-1 pr-2 text-right">Req/s</th>
+                <th className="py-1 pr-2 text-right">Req total</th>
+                <th className="py-1 pr-2 text-right" title="Failed requests as a share of total">Err %</th>
+                <th className="py-1 pr-2 text-right" title="p95 end-to-end latency (model + gateway)">E2E p95</th>
+                <th className="py-1 pr-2 text-right" title="p95 time to first token">TTFT p95</th>
+                <th className="py-1 pr-2 text-right">Tokens/s</th>
+                <th className="py-1 text-right" title="Cumulative spend (USD)">Spend</th>
+              </tr>
+            </thead>
+            <tbody className="font-mono">
+              {gateway.models.map((m) => (
+                <tr key={m.model} className="border-b border-purple-100/60 last:border-0">
+                  <td className="py-1 pr-2 font-sans font-medium">{m.model}</td>
+                  <td className="py-1 pr-2 text-right">{m.requestsPerSec != null ? m.requestsPerSec.toFixed(2) : '—'}</td>
+                  <td className="py-1 pr-2 text-right">{m.requestsTotal}</td>
+                  <td className={cn('py-1 pr-2 text-right', (m.errorRatePct ?? 0) >= 5 && 'text-amber-600 font-semibold')}>
+                    {m.errorRatePct != null ? `${m.errorRatePct.toFixed(1)}%` : '—'}
+                  </td>
+                  <td className="py-1 pr-2 text-right">{m.e2eP95Seconds != null ? `${m.e2eP95Seconds.toFixed(2)}s` : '—'}</td>
+                  <td className="py-1 pr-2 text-right">{m.ttftP95Seconds != null ? `${m.ttftP95Seconds.toFixed(2)}s` : '—'}</td>
+                  <td className="py-1 pr-2 text-right">{m.tokensPerSec != null ? m.tokensPerSec.toFixed(1) : '—'}</td>
+                  <td className="py-1 text-right">{m.spend != null ? `$${m.spend.toFixed(2)}` : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ServingHealth lists LLM serving pods (vLLM/sglang) and their inference health.
 function ServingHealth() {
   const [pods, setPods] = useState(null);
@@ -658,6 +759,7 @@ function ServingHealth() {
   const [sortBy, setSortBy] = useState('throughput');
   const [trendWindow, setTrendWindow] = useState('6h');
   const [servingHistory, setServingHistory] = useState({}); // key: ns/name -> {points, lastIssue}
+  const [gateway, setGateway] = useState(null);
 
   const fetchServing = useCallback(async () => {
     setLoading(true);
@@ -688,11 +790,29 @@ function ServingHealth() {
     }
   }, [trendWindow]);
 
+  // Gateway health is a separate concern (LiteLLM proxy /metrics), fetched on
+  // its own so a gateway failure never blocks the pod health view. null when
+  // no LiteLLM proxy is detected (the card then hides itself).
+  const fetchGateway = useCallback(async () => {
+    try {
+      const response = await axios.get(`${API_URL}/api/v1/serving/gateway`);
+      setGateway(response.data.gateway || null);
+    } catch (err) {
+      setGateway(null);
+    }
+  }, []);
+
   useEffect(() => {
     fetchServing();
     const interval = setInterval(fetchServing, 30000);
     return () => clearInterval(interval);
   }, [fetchServing]);
+
+  useEffect(() => {
+    fetchGateway();
+    const interval = setInterval(fetchGateway, 30000);
+    return () => clearInterval(interval);
+  }, [fetchGateway]);
 
   // Trend history is sampled server-side on the 60s cluster interval, so a
   // slower refresh (60s) keeps sparklines current without hammering the API.
@@ -778,6 +898,7 @@ function ServingHealth() {
         ) : (
           <div className="space-y-4">
             <MetricExplainer />
+            <GatewayCard gateway={gateway} />
             {pods === null ? (
               <div className="flex flex-col items-center justify-center py-8">
                 <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mb-2" />
