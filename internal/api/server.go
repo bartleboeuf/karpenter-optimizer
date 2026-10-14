@@ -45,6 +45,7 @@ import (
 	"github.com/karpenter-optimizer/internal/config"
 	"github.com/karpenter-optimizer/internal/history"
 	"github.com/karpenter-optimizer/internal/kubernetes"
+	"github.com/karpenter-optimizer/internal/litellm"
 	"github.com/karpenter-optimizer/internal/power"
 	"github.com/karpenter-optimizer/internal/recommender"
 	"github.com/karpenter-optimizer/internal/servinghistory"
@@ -143,6 +144,9 @@ func NewServer(cfg *config.Config) *Server {
 		servingHistoryStore: servinghistory.New(historyWindowFromEnv()),
 	}
 
+	// Configure the process-wide LiteLLM gateway prober with the metrics
+	// auth key (empty = unauthenticated).
+	litellmProber = litellm.NewProber(cfg.LiteLLMMetricsAPIKey)
 	server.setupRoutes()
 
 	// Sample cluster usage and serving pod health into the history stores for
@@ -244,6 +248,7 @@ func (s *Server) setupRoutes() {
 		api.GET("/cluster/summary", s.getClusterSummary)
 		api.GET("/history", s.getHistory)
 		api.GET("/serving", s.getServing)
+		api.GET("/serving/gateway", s.getServingGateway)
 		api.GET("/serving/history", s.getServingHistory)
 		api.GET("/recommendations/cluster-summary", s.getRecommendationsFromClusterSummary)
 		api.GET("/recommendations/cluster-summary/stream", s.getRecommendationsFromClusterSummarySSE)

@@ -2558,10 +2558,81 @@ func matchLLMMarker(lower string) string {
 }
 
 func portOrDefault(port int32) int32 {
+	return portOrDefaultWith(port, 8000)
+}
+
+// portOrDefaultWith returns port, or fallback when port is 0/unset.
+func portOrDefaultWith(port, fallback int32) int32 {
 	if port == 0 {
-		return 8000
+		return fallback
 	}
 	return port
+}
+
+// LiteLLMPodInfo identifies a LiteLLM AI-gateway proxy pod that can be scraped
+// for gateway metrics (http://<ip>:<port>/metrics).
+type LiteLLMPodInfo struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	IP        string `json:"ip"`
+	Port      int32  `json:"port"`
+	Image     string `json:"image"`
+	NodeName  string `json:"nodeName"`
+}
+
+// FindLiteLLMPods lists, across all namespaces, running pods that look like a
+// LiteLLM proxy (image or command contains "litellm"). It returns the pod IP
+// and the first container port (or 4000, LiteLLM's default) so callers can
+// scrape http://<ip>:<port>/metrics.
+func (c *Client) FindLiteLLMPods(ctx context.Context) ([]LiteLLMPodInfo, error) {
+	pods, err := c.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pods for LiteLLM discovery: %w", err)
+	}
+
+	var out []LiteLLMPodInfo
+	for _, pod := range pods.Items {
+		if pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		if pod.Status.PodIP == "" {
+			continue
+		}
+		port, image := detectLiteLLMPod(&pod)
+		if image == "" {
+			continue
+		}
+		out = append(out, LiteLLMPodInfo{
+			Namespace: pod.Namespace,
+			Name:      pod.Name,
+			IP:        pod.Status.PodIP,
+			Port:      port,
+			Image:     image,
+			NodeName:  pod.Spec.NodeName,
+		})
+	}
+	return out, nil
+}
+
+// detectLiteLLMPod returns (port, image) for a pod that looks like a LiteLLM
+// proxy, or (0, "") otherwise.
+func detectLiteLLMPod(pod *corev1.Pod) (int32, string) {
+	var firstPort int32
+	for _, container := range pod.Spec.Containers {
+		if firstPort == 0 && len(container.Ports) > 0 {
+			firstPort = container.Ports[0].ContainerPort
+		}
+		image := container.Image
+		if strings.Contains(strings.ToLower(image), "litellm") {
+			return portOrDefaultWith(firstPort, 4000), image
+		}
+		// Also match command/args (e.g. "litellm --config ...").
+		cmd := strings.ToLower(strings.Join(append(container.Command, container.Args...), " "))
+		if strings.Contains(cmd, "litellm") {
+			return portOrDefaultWith(firstPort, 4000), image
+		}
+	}
+	return 0, ""
 }
 
 // NodePlacement summarizes the hardware a workload runs on: node instance

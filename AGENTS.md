@@ -25,7 +25,8 @@ This document provides context and guidelines for AI coding assistants working o
  - `internal/awspricing/client.go` - AWS Pricing API client for instance pricing
  - `internal/power/power.go` - Static EC2-family wattage table; `Estimate(instanceTypes)` returns fleet watts + coverage
  - `internal/ollama/client.go` - Ollama LLM client for AI explanations
- - `internal/llmhealth/probe.go` - Probes vLLM/sglang pods (`PodHealth`); rate diffs (tok/s, req/s) come from successive counter samples
+ - `internal/llmhealth/probe.go` - Probes vLLM/sglang pods (`PodHealth`); rate diffs (tok/s, req/s) come from successive counter samples. `Metrics` (probe.go + `metrics.go`) is the exported Prometheus text-exposition parser (gauge/counter/histogram query helpers, per-label-variant histograms) shared by the serving and LiteLLM probers
+ - `internal/litellm/probe.go` - Probes LiteLLM AI-gateway proxy pods' `/metrics` (discovered via `kubernetes.Client.FindLiteLLMPods`); aggregates replicas into `GatewayHealth` (in-flight, admission queue/rejections, error rate, E2E/TTFT/queue/overhead p95, spend, per-model breakdown). Bearer auth via `LITELLM_METRICS_API_KEY`; 401/403 → `AuthError` hint
  - `internal/history/store.go` - In-memory cluster-trend ring buffer (CPU/mem/GPU/cost) for the cluster sparklines
  - `internal/servinghistory/store.go` - In-memory per-pod serving-metric ring buffer; `Add(ns,name,Point)`, `Series(ns,name,window)`, `LastIssue(ns,name,window,kvThresholdPct)` — powers `/serving/history` trends
 
@@ -36,7 +37,7 @@ This document provides context and guidelines for AI coding assistants working o
   - `components/GlobalClusterSummary.js` - Cluster overview and recommendation trigger
   - `components/NodePoolCard.js` - Displays individual NodePool recommendations
  - `components/NodeUsageView.js` - Real-time node resource usage visualization
- - `components/ServingHealth.js` - LLM serving (vLLM/sglang) inference health cards + "Model usage" throughput ranking & sort + per-server status badge (OK/Busy/Slow/Under pressure via `getServingStatus`, with meaning + fix hints in the tooltip) + metric-explanation tooltips and collapsible "What do these metrics mean?" accordion + per-card **collapsible** Trends sparklines (TTFT p95, E2E p95, KV cache %, throughput, req/s over 1h/6h/24h; collapsed by default showing a KV%/throughput/last-issue summary line) + per-card GPU card-UUID badges (`gpuDevices` from the HAMi annotation, short UUID + memory, full UUID in tooltip)
+ - `components/ServingHealth.js` - LLM serving (vLLM/sglang) inference health cards + "Model usage" throughput ranking & sort + per-server status badge (OK/Busy/Slow/Under pressure via `getServingStatus`, with meaning + fix hints in the tooltip) + metric-explanation tooltips and collapsible "What do these metrics mean?" accordion + per-card **collapsible** Trends sparklines (TTFT p95, E2E p95, KV cache %, throughput, req/s over 1h/6h/24h; collapsed by default showing a KV%/throughput/last-issue summary line) + per-card GPU card-UUID badges (`gpuDevices` from the HAMi annotation, short UUID + memory, full UUID in tooltip) + **LiteLLM Gateway card** (stat tiles: in-flight, queued, 503s, error rate, E2E p95, overhead p95, req/s; per-model table; amber banner with `LITELLM_METRICS_API_KEY` hint on 401/403; hidden when no LiteLLM proxy is detected) fed by `/api/v1/serving/gateway`
  - `components/DisruptionTracker.js` - Node disruption tracking (on-demand)
 
 ## Key Data Structures
@@ -115,6 +116,7 @@ type NodeInfo struct {
 - `GET /api/v1/cluster/summary` - Cluster-wide statistics
 - `GET /api/v1/serving` - Inference health for detected LLM serving pods (vLLM/sglang); per pod: model, KV cache %, running/waiting, TTFT (mean+p95), E2E latency (`e2eSeconds`/`e2eP95Seconds`, mean+p95), preemptions, `tokensPerSec`, `requestsPerSec` (rates derived from counter diffs, nil on first sample or when the upstream metric is absent), placement (`node` = node name, `nodeHostname` = `kubernetes.io/hostname` label falling back to the node name, `nodeInstanceType`, `gpuModel`, `gpuCapacity` — filled server-side via `kubernetes.Client.GetNodePlacement` from node labels), and `gpuDevices` (specific physical GPU cards, `{uuid,model,memoryMiB,index}` from the HAMi/KAI `hami.io/vgpu-devices-allocated` annotation — only present on HAMi/KAI clusters). The serving card displays `nodeHostname` (click-to-copy copies `node`).
 - `GET /api/v1/serving/history?window=6h` - Per-pod serving metric trends. A background sampler (same 60s interval as the cluster trends, `Server.startServingHistorySampler` → `Server.sampleServing`) probes serving pods on each tick and appends a sample to the in-memory `servinghistory.Store` (retention = `HISTORY_WINDOW_HOURS`). Returns per pod `{namespace, name, window, points[], lastIssue}`; `lastIssue` is the Unix time of the most recent sample in the window where the pod was offline / `waiting>0` / `preemptions>0` / KV cache ≥ 85% (0 = none). In-memory only — resets on restart
+- `GET /api/v1/serving/gateway` - LiteLLM AI-gateway health (new). Returns `{gateway: GatewayHealth|null}` — `null` when no LiteLLM proxy pod is detected (frontend hides the card). `GatewayHealth`: `pods` (replicas found), `online`, `authError` (401/403 hint → set `LITELLM_METRICS_API_KEY`), `inFlightRequests`, `admissionQueued`, `admissionRejected` (503s), `totalRequests`, `failedRequests`, `errorRatePct`, `requestsPerSec` (counter diffs, nil until 2nd sample, 0 on counter reset), `e2eP95Seconds`, `ttftP95Seconds`, `queueTimeP95Seconds`, `overheadP95Seconds` (gateway-side processing, isolates gateway cost from model latency), `spend` (USD), and `models[]` (`model`, `requestsTotal`, `failedRequests`, `errorRatePct`, `requestsPerSec`, `tokensPerSec`, `e2eP95Seconds`, `ttftP95Seconds`, `spend`). Counters/gauges summed across replicas; quantiles = worst case across replicas. 15s cache
 - `GET /api/v1/disruptions?hours=N` - Live node disruptions (FailedDraining events + nodes marked for deletion). Each item includes `capacityType`, `eventCount` (real FailedDraining event count), `costPerHour`/`costSource` (spot-aware, from cached pricing), plus a top-level `summary` (`blockedCount`, `activeCount`, `totalCostPerHour`, `totalCostPerDay`, `byNodePool`). Backend fetches pods (one paginated list) and PDBs (one list) per request, not per node/pod.
 - `GET /api/v1/disruptions/recent?hours=N` - Recently deleted (completed) disruption nodes
 
@@ -283,6 +285,7 @@ type NodeInfo struct {
 - `PORT` - API server port (default: 8080)
 - `HISTORY_INTERVAL_SECS` - Cluster trend sampler interval (default: 60)
 - `HISTORY_WINDOW_HOURS` - Cluster trend history retention (default: 6, max 24)
+- `LITELLM_METRICS_API_KEY` - Bearer token for the LiteLLM proxy `/metrics` endpoint (required by LiteLLM ≥ v1.85.0); optional — when unset the gateway is scraped unauthenticated and a 401/403 surfaces as an actionable banner in the UI
 
 ## Code Style
 
@@ -358,6 +361,7 @@ Before marking any task complete, verify:
 
 ## Recent Changes
 
+- **LiteLLM AI-Gateway Health**: `GET /api/v1/serving/gateway` + Serving-tab Gateway card (fleet stats, per-model breakdown, overhead-vs-model latency split, 401 hint via `LITELLM_METRICS_API_KEY`)
 - **Karpenter Log Analyzer**: Analyze error logs with AI-powered explanations
 - **NodePool-based recommendations**: Primary recommendation engine
 - **AWS Pricing API integration**: Dynamic instance type discovery
