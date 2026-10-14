@@ -88,15 +88,26 @@ func NewProber(apiKey string) *Prober {
 	}
 }
 
-// modelMetrics are the LiteLLM metrics that carry a `model` label.
+// modelMetrics are the LiteLLM metrics that carry a base `model` label (used
+// to discover the full model list). The request/failed counters are excluded
+// because in current LiteLLM they are labeled with the alias-prefixed
+// `requested_model` rather than `model`.
 var modelMetrics = []string{
-	"litellm_proxy_total_requests_metric",
-	"litellm_proxy_failed_requests_metric",
 	"litellm_request_total_latency_metric",
 	"litellm_llm_api_time_to_first_token_metric",
 	"litellm_total_tokens_metric",
+	"litellm_input_tokens_metric",
+	"litellm_output_tokens_metric",
 	"litellm_spend_metric",
 }
+
+// requestCounterLabel is the label LiteLLM uses on its request/failed counters.
+// Since v1.81.x it is `requested_model` (alias-prefixed); older releases used
+// `model`. The prober detects which one is present per replica.
+const (
+	reqLabelRequested = "requested_model"
+	reqLabelModel     = "model"
+)
 
 // ProbeAll scrapes every replica and aggregates the results.
 func (p *Prober) ProbeAll(ctx context.Context, refs []PodRef) GatewayHealth {
@@ -129,7 +140,7 @@ func (p *Prober) ProbeAll(ctx context.Context, refs []PodRef) GatewayHealth {
 		if v, ok := m.Gauge("litellm_admission_queued_requests"); ok {
 			h.AdmissionQueued += int(v)
 		}
-		if v, ok := m.Total("litellm_admission_rejected_requests_total"); ok {
+		if v, ok := m.Total("litellm_admission_rejected_requests"); ok {
 			h.AdmissionRejected += int64(v)
 		}
 		if v, ok := m.Total("litellm_proxy_total_requests_metric"); ok {
@@ -146,36 +157,43 @@ func (p *Prober) ProbeAll(ctx context.Context, refs []PodRef) GatewayHealth {
 		mergeQuantile(&h.QueueTimeP95Seconds, queueP95, hasQueue)
 		overheadP95, hasOverhead := m.HistogramQuantile("litellm_overhead_latency_metric", 0.95)
 		mergeQuantile(&h.OverheadP95Seconds, overheadP95, hasOverhead)
-		if v, ok := m.Total("litellm_spend_metric"); ok && v > 0 {
+		if v, ok := m.Total("litellm_spend_metric"); ok {
 			setSum(&h.Spend, v)
 		}
 
-		if r, ok := p.rate(replicaKey, "litellm_proxy_total_requests_metric", m, ""); ok {
+		reqTotal, _ := m.Total(requestCounterName)
+		if r, ok := p.observeRate(replicaKey+"|fleetReq", reqTotal); ok {
 			fleetReqRate += r
 			hasFleetReq = true
 		}
 
-		// Per-model breakdown: model names appear on several metrics; merge.
+		// Per-model breakdown: base models come from the `model` label (tokens /
+		// latency / spend metrics). Request/failed counters are labeled by the
+		// alias-prefixed `requested_model`, so they are bridged to the base model
+		// (see modelRequestValues) before being attributed.
+		reqByModel, failedByModel := modelRequestValues(m)
 		for _, name := range modelNames(m) {
 			acc := models[name]
 			if acc == nil {
 				acc = &modelAcc{model: name}
 				models[name] = acc
 			}
-			acc.requests += orZero(m.TotalByLabel("litellm_proxy_total_requests_metric", "model", name))
-			acc.failed += orZero(m.TotalByLabel("litellm_proxy_failed_requests_metric", "model", name))
-			if v, ok := m.TotalByLabel("litellm_spend_metric", "model", name); ok && v > 0 {
+			acc.requests += reqByModel[name]
+			acc.failed += failedByModel[name]
+			if v, ok := m.TotalByLabel("litellm_spend_metric", "model", name); ok {
 				setSum(&acc.spend, v)
 			}
 			modelE2EP95, hasModelE2E := m.HistogramQuantileByLabel("litellm_request_total_latency_metric", "model", name, 0.95)
 			mergeQuantile(&acc.e2eP95, modelE2EP95, hasModelE2E)
 			modelTTFTP95, hasModelTTFT := m.HistogramQuantileByLabel("litellm_llm_api_time_to_first_token_metric", "model", name, 0.95)
 			mergeQuantile(&acc.ttftP95, modelTTFTP95, hasModelTTFT)
-			if r, ok := p.rate(replicaKey, "litellm_proxy_total_requests_metric", m, name); ok {
+			if r, ok := p.observeRate(replicaKey+"|req|"+name, reqByModel[name]); ok {
 				acc.addRate(&acc.reqRate, r)
 			}
-			if r, ok := p.rate(replicaKey, "litellm_total_tokens_metric", m, name); ok {
-				acc.addRate(&acc.tokRate, r)
+			if tok, ok := m.TotalByLabel("litellm_total_tokens_metric", "model", name); ok {
+				if r, ok := p.observeRate(replicaKey+"|tok|"+name, tok); ok {
+					acc.addRate(&acc.tokRate, r)
+				}
 			}
 		}
 	}
@@ -261,20 +279,51 @@ func (a *modelAcc) stat() ModelStat {
 	return stat
 }
 
-// rate derives the per-replica per-second rate for one cumulative counter
-// from diffs between successive probes. ok=false on the first sample for that
-// replica/metric/model (no previous point) or when the counter is absent.
-// Counter resets (replica restart) yield 0 growth, never a negative rate.
-func (p *Prober) rate(replicaKey, metric string, m *llmhealth.Metrics, model string) (float64, bool) {
-	key := replicaKey + "|" + metric
-	if model != "" {
-		key += "|" + model
-	}
-	cur, ok := counterAt(m, metric, model)
-	if !ok {
-		return 0, false
-	}
+// requestCounterName is the base name of LiteLLM's total-requests counter. The
+// parser matches it suffix-tolerantly, so both `litellm_proxy_total_requests_metric`
+// and `litellm_proxy_total_requests_metric_total` are read.
+const requestCounterName = "litellm_proxy_total_requests_metric"
 
+// requestCounterLabel reports which label this replica's request counters use
+// for the model dimension.
+func requestCounterLabel(m *llmhealth.Metrics) string {
+	if len(m.LabelValues(requestCounterName, reqLabelRequested)) > 0 {
+		return reqLabelRequested
+	}
+	return reqLabelModel
+}
+
+// modelRequestValues returns per-base-model total requests and failures for one
+// replica. The counters are labeled by the alias-prefixed `requested_model`, so
+// each value is bridged to the base `model` (via a metric that carries both
+// labels) before being keyed by base model; anything that can't be bridged is
+// dropped from the per-model rows (it still counts in the fleet total).
+func modelRequestValues(m *llmhealth.Metrics) (map[string]float64, map[string]float64) {
+	labelKey := requestCounterLabel(m)
+	bridge := m.LabelPairMap(reqLabelRequested, "model")
+	return projectByBaseModel(m, "litellm_proxy_total_requests_metric", labelKey, bridge),
+		projectByBaseModel(m, "litellm_proxy_failed_requests_metric", labelKey, bridge)
+}
+
+func projectByBaseModel(m *llmhealth.Metrics, metric, labelKey string, bridge map[string]string) map[string]float64 {
+	out := map[string]float64{}
+	for _, raw := range m.LabelValues(metric, labelKey) {
+		base, ok := bridge[raw]
+		if !ok {
+			continue
+		}
+		if v, ok := m.TotalByLabel(metric, labelKey, raw); ok {
+			out[base] += v
+		}
+	}
+	return out
+}
+
+// observeRate derives a per-second rate for one cumulative counter from diffs
+// between successive probes, keyed by an opaque state key. ok=false on the
+// first sample for that key (no previous point). Counter resets (replica
+// restart) yield 0 growth, never a negative rate.
+func (p *Prober) observeRate(key string, cur float64) (float64, bool) {
 	now := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -292,20 +341,6 @@ func (p *Prober) rate(replicaKey, metric string, m *llmhealth.Metrics, model str
 	}
 	p.last[key] = &rateState{value: cur, ts: now}
 	return r, hasRate
-}
-
-func counterAt(m *llmhealth.Metrics, metric, model string) (float64, bool) {
-	if model == "" {
-		return m.Total(metric)
-	}
-	return m.TotalByLabel(metric, "model", model)
-}
-
-func orZero(v float64, ok bool) float64 {
-	if !ok {
-		return 0
-	}
-	return v
 }
 
 type fetchStatus int
