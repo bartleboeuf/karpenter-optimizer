@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/karpenter-optimizer/internal/llmhealth"
 )
 
 func splitHostPort(t *testing.T, rawURL string) (string, int32) {
@@ -33,16 +35,18 @@ litellm_admission_queued_requests 2
 # TYPE litellm_admission_rejected_requests_total counter
 litellm_admission_rejected_requests_total 3
 # TYPE litellm_proxy_total_requests_metric counter
-litellm_proxy_total_requests_metric{model="gpt-4o",api_key="A"} 100
-litellm_proxy_total_requests_metric{model="qwen3-30b",api_key="A"} 40
+# (request counter is labeled by the alias-prefixed requested_model)
+litellm_proxy_total_requests_metric_total{requested_model="pre/gpt-4o"} 100
+litellm_proxy_total_requests_metric_total{requested_model="pre/qwen3-30b"} 40
 # TYPE litellm_proxy_failed_requests_metric counter
-litellm_proxy_failed_requests_metric{model="qwen3-30b",api_key="A"} 4
+litellm_proxy_failed_requests_metric_total{requested_model="pre/qwen3-30b"} 4
 # TYPE litellm_spend_metric counter
-litellm_spend_metric{model="gpt-4o"} 1.25
-litellm_spend_metric{model="qwen3-30b"} 0.5
+litellm_spend_metric_total{model="gpt-4o"} 1.25
+litellm_spend_metric_total{model="qwen3-30b"} 0.5
 # TYPE litellm_total_tokens_metric counter
-litellm_total_tokens_metric{model="gpt-4o"} 50000
-litellm_total_tokens_metric{model="qwen3-30b"} 20000
+# (tokens carry BOTH model and requested_model -> the join bridge)
+litellm_total_tokens_metric_total{model="gpt-4o",requested_model="pre/gpt-4o"} 50000
+litellm_total_tokens_metric_total{model="qwen3-30b",requested_model="pre/qwen3-30b"} 20000
 # TYPE litellm_request_total_latency_metric histogram
 litellm_request_total_latency_metric_bucket{model="gpt-4o",le="1.0"} 60
 litellm_request_total_latency_metric_bucket{model="gpt-4o",le="10.0"} 100
@@ -78,13 +82,13 @@ litellm_in_flight_requests 3
 # TYPE litellm_admission_queued_requests gauge
 litellm_admission_queued_requests 1
 # TYPE litellm_proxy_total_requests_metric counter
-litellm_proxy_total_requests_metric{model="gpt-4o",api_key="A"} 30
+litellm_proxy_total_requests_metric_total{requested_model="pre/gpt-4o"} 30
 # TYPE litellm_proxy_failed_requests_metric counter
-litellm_proxy_failed_requests_metric{model="gpt-4o",api_key="A"} 1
+litellm_proxy_failed_requests_metric_total{requested_model="pre/gpt-4o"} 1
 # TYPE litellm_spend_metric counter
-litellm_spend_metric{model="gpt-4o"} 0.3
+litellm_spend_metric_total{model="gpt-4o"} 0.3
 # TYPE litellm_total_tokens_metric counter
-litellm_total_tokens_metric{model="gpt-4o"} 15000
+litellm_total_tokens_metric_total{model="gpt-4o",requested_model="pre/gpt-4o"} 15000
 `
 
 func TestProbeAllAggregatesReplicas(t *testing.T) {
@@ -335,5 +339,41 @@ func TestProbeAllPartialReplicas(t *testing.T) {
 	}
 	if h.TotalRequests != 140 {
 		t.Errorf("TotalRequests = %d, want 140 (only replica A counted)", h.TotalRequests)
+	}
+}
+
+// TestModelRequestBridge verifies that request/failed counters labeled by the
+// alias-prefixed `requested_model` are joined onto the base `model` via a
+// metric carrying both labels, and that unbridgeable requested_models are
+// dropped from per-model rows (still counted in the fleet total).
+func TestModelRequestBridge(t *testing.T) {
+	t.Parallel()
+
+	body := `# TYPE litellm_proxy_total_requests_metric counter
+litellm_proxy_total_requests_metric_total{requested_model="pre/gpt-4o"} 10
+litellm_proxy_total_requests_metric_total{requested_model="pre/qwen"} 5
+litellm_proxy_total_requests_metric_total{requested_model="pre/orphan"} 7
+# TYPE litellm_total_tokens_metric counter
+litellm_total_tokens_metric_total{model="gpt-4o",requested_model="pre/gpt-4o"} 100
+litellm_total_tokens_metric_total{model="qwen",requested_model="pre/qwen"} 200
+`
+	m := llmhealth.ParsePrometheus(body)
+
+	req, failed := modelRequestValues(m)
+	if req["gpt-4o"] != 10 {
+		t.Errorf("gpt-4o requests = %v, want 10", req["gpt-4o"])
+	}
+	if req["qwen"] != 5 {
+		t.Errorf("qwen requests = %v, want 5", req["qwen"])
+	}
+	if _, ok := req["pre/orphan"]; ok {
+		t.Error("unbridgeable requested_model must not appear in per-model rows")
+	}
+	// The orphan's 7 requests still count toward the fleet total.
+	if total, _ := m.Total("litellm_proxy_total_requests_metric"); total != 22 {
+		t.Errorf("fleet total = %v, want 22 (10+5+7)", total)
+	}
+	if failed["gpt-4o"] != 0 {
+		t.Errorf("gpt-4o failed = %v, want 0", failed["gpt-4o"])
 	}
 }

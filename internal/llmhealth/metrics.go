@@ -65,27 +65,63 @@ func (m *Metrics) CounterByLabel(name, labelKey, labelValue string) (float64, bo
 	return sumByLabel(m.counters[name], labelKey, labelValue)
 }
 
-// Total returns a metric's value regardless of how the parser classified it.
-// Useful for cumulative counters that lack the "_total" suffix (e.g.
-// LiteLLM's litellm_proxy_failed_requests_metric), which the parser stores
-// as gauges.
+// Total returns a cumulative metric's value summed across all label variants,
+// regardless of how the parser classified it and whether it is exposed with
+// the Prometheus "_total" suffix (e.g. LiteLLM exposes litellm_spend_metric as
+// litellm_spend_metric_total). Histogram aggregation lines (_sum/_count/_bucket)
+// are excluded so a histogram is never mistaken for a counter.
 func (m *Metrics) Total(name string) (float64, bool) {
-	c, cOK := counterValue(m.counters, name)
-	g, gOK := gaugeValue(m.gauges, name)
-	if !cOK && !gOK {
-		return 0, false
+	var total float64
+	found := false
+	for _, s := range m.samples {
+		if !matchesMetricBase(s.name, name) || isHistogramAgg(s.name) {
+			continue
+		}
+		total += s.value
+		found = true
 	}
-	return c + g, true
+	return total, found
 }
 
-// TotalByLabel is Total restricted to one label value (see Total).
+// TotalByLabel is Total restricted to one label value (exact match), summed
+// across all other label variants.
 func (m *Metrics) TotalByLabel(name, labelKey, labelValue string) (float64, bool) {
-	c, cOK := sumByLabel(m.counters[name], labelKey, labelValue)
-	g, gOK := sumByLabel(m.gauges[name], labelKey, labelValue)
-	if !cOK && !gOK {
-		return 0, false
+	var total float64
+	found := false
+	for _, s := range m.samples {
+		if !matchesMetricBase(s.name, name) || isHistogramAgg(s.name) {
+			continue
+		}
+		if lv, ok := s.labels[labelKey]; ok && lv == labelValue {
+			total += s.value
+			found = true
+		}
 	}
-	return c + g, true
+	return total, found
+}
+
+// metricBase strips a trailing histogram/counter suffix so gauges, counters
+// (bare or "_total"), and histogram sum/count/bucket series all collapse to
+// their base metric name.
+func metricBase(raw string) string {
+	for _, suffix := range []string{"_bucket", "_sum", "_count", "_total"} {
+		if b, ok := strings.CutSuffix(raw, suffix); ok {
+			return b
+		}
+	}
+	return raw
+}
+
+func matchesMetricBase(raw, name string) bool {
+	return metricBase(raw) == name
+}
+
+func isHistogramAgg(raw string) bool {
+	switch {
+	case strings.HasSuffix(raw, "_sum"), strings.HasSuffix(raw, "_count"), strings.HasSuffix(raw, "_bucket"):
+		return true
+	}
+	return false
 }
 
 // GaugeByLabel sums a gauge's value for the given label (exact match), across
@@ -110,13 +146,7 @@ func (m *Metrics) LabelValues(name string, labelKey string) []string {
 		}
 	}
 	for _, s := range m.samples {
-		base := s.name
-		for _, suffix := range []string{"_bucket", "_sum", "_count"} {
-			if b, ok := strings.CutSuffix(base, suffix); ok {
-				base = b
-			}
-		}
-		if base == name {
+		if metricBase(s.name) == name && !isHistogramAgg(s.name) {
 			add(s.labels)
 		}
 	}
@@ -155,6 +185,28 @@ func (m *Metrics) HistogramQuantileByLabel(name, labelKey, labelValue string, q 
 		return 0, false
 	}
 	return histogramVariantQuantile(&merged, q)
+}
+
+// LabelPairMap returns every observed (valueOfKeyA -> valueOfKeyB) association
+// across all series that carry both label keys. Used to bridge metrics that
+// label the same model under different names — e.g. LiteLLM's request counters
+// use `requested_model` (alias-prefixed) while spend/token/latency metrics use
+// `model` (base name); a metric carrying both labels (litellm_total_tokens_metric)
+// provides the join. A valueOfKeyA maps to at most one valueOfKeyB (the first
+// seen); keys not observed are simply absent.
+func (m *Metrics) LabelPairMap(keyA, keyB string) map[string]string {
+	out := map[string]string{}
+	for _, s := range m.samples {
+		a, okA := s.labels[keyA]
+		b, okB := s.labels[keyB]
+		if !okA || !okB || a == "" || b == "" {
+			continue
+		}
+		if _, exists := out[a]; !exists {
+			out[a] = b
+		}
+	}
+	return out
 }
 
 func sumByLabel(vs []namedValue, labelKey, labelValue string) (float64, bool) {
