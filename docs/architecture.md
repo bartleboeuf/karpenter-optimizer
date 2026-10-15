@@ -62,7 +62,7 @@ Karpenter Optimizer is a two-tier application consisting of a React frontend, a 
 - **Purpose**: Fetch real-time EC2 instance pricing
 - **Client**: Custom HTTP client with caching
 - **Fallback**: Hardcoded pricing map if API unavailable
-- **Region**: Defaults to `us-east-1`, configurable
+- **Region**: Defaults to `us-east-1`, configurable. Global requests prefer `us-east-1` for Americas, `eu-central-1` for Europe/Middle East/Africa, and `ap-south-1` for Asia-Pacific, with the other global endpoints as transient-error failovers. The product-location filter always targets the configured workload region. AWS China regions `cn-north-1` and `cn-northwest-1` use only the China Pricing API endpoint in `cn-northwest-1` and the matching China-region product location.
 
 ### LLM Integration
 - **Purpose**: Generate AI-powered explanations for recommendations

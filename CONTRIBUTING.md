@@ -54,7 +54,7 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 
 ### Prerequisites
 
-- Go 1.21 or later
+- Go 1.25 or later
 - Node.js 16+ and npm
 - Docker and docker-compose (optional)
 - Kubernetes cluster with Karpenter (for testing)

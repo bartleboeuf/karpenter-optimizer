@@ -205,6 +205,10 @@ See `charts/karpenter-optimizer/templates/rbac.yaml` for the default RBAC config
 
 The application uses AWS Pricing API for cost calculations. The pricing API uses a public endpoint and doesn't require authentication, but **IRSA (IAM Roles for Service Accounts) is recommended** for EKS clusters to follow AWS security best practices.
 
+When the configured AWS region is `cn-north-1` or `cn-northwest-1`, the client uses the AWS China Pricing API endpoint `api.pricing.cn-northwest-1.amazonaws.com.cn` and the corresponding China region location in pricing queries. Both China regions are served by that endpoint.
+
+For the global AWS partition, the client prefers the Pricing API endpoint geographically closest to the configured target region: `us-east-1` for the Americas, `eu-central-1` for Europe/Middle East/Africa, and `ap-south-1` for Asia-Pacific. If the preferred endpoint returns a transient network, timeout, throttling, or server error, the request can retry through the other global endpoints. Authorization and invalid-request errors are not failed over. The target region's location filter is preserved regardless of which endpoint serves the request. China requests never fall back across partitions.
+
 **For EKS clusters (Recommended)**:
 1. Set up IRSA following the [IRSA Setup Guide](irsa-setup.md)
 2. Configure the service account annotation in Helm values:
