@@ -16,6 +16,7 @@ import AgentRecommendations from './components/AgentRecommendations';
 import KarpenterLogAnalyzer from './components/KarpenterLogAnalyzer';
 import ServingHealth from './components/ServingHealth';
 import { cn } from './lib/utils';
+import { CurrencyRegionContext, formatCurrency } from './lib/currency';
 
 // Use runtime configuration from window.ENV (set via config.js) or build-time env var
 const API_URL = (window.ENV && window.ENV.hasOwnProperty('REACT_APP_API_URL')) 
@@ -34,6 +35,7 @@ function App() {
   const karpenterDetected = config?.karpenter?.detected ?? false;
   const kubernetesConnected = config?.kubernetes?.connected ?? false;
   const showNoKarpenterBanner = showKarpenterBanner && kubernetesConnected && !karpenterDetected;
+  const currency = (value) => formatCurrency(value, config?.aws?.region);
 
   useEffect(() => {
     checkHealth();
@@ -61,6 +63,7 @@ function App() {
   };
 
   return (
+    <CurrencyRegionContext.Provider value={config?.aws?.region || ''}>
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
       <header className="bg-white border-b border-gray-200 shadow-sm">
@@ -309,6 +312,12 @@ function App() {
                         <p className="text-xs text-muted-foreground">
                           Instance pricing is fetched dynamically from AWS Pricing API for accurate cost calculations.
                         </p>
+                        <p className="text-xs text-muted-foreground mt-2">
+                          Region: {config.aws?.region || 'Not configured'} · Currency: {config.aws?.currency || 'USD'}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-2">
+                          Region: {config.aws?.region || 'Not configured'} · Currency: {config.aws?.currency || 'USD'}
+                        </p>
                       </CardContent>
                     </Card>
 
@@ -370,10 +379,10 @@ function App() {
                       <div>
                         <p className="text-sm text-muted-foreground">Current Cost</p>
                         <p className="text-2xl font-bold">
-                          ${clusterCost.current.toFixed(2)}/hr
+                          {currency(clusterCost.current)}/hr
                         </p>
                         <p className="text-xs text-muted-foreground">
-                          ${(clusterCost.current * 24).toFixed(2)}/day
+                          {currency(clusterCost.current * 24)}/day
                         </p>
                       </div>
                       <div>
@@ -392,21 +401,21 @@ function App() {
                       <div>
                         <p className="text-sm text-muted-foreground">Recommended Cost</p>
                         <p className="text-2xl font-bold text-green-600">
-                          ${clusterCost.recommended.toFixed(2)}/hr
+                          {currency(clusterCost.recommended)}/hr
                         </p>
                         <p className="text-xs text-muted-foreground">
-                          ${(clusterCost.recommended * 24).toFixed(2)}/day
+                          {currency(clusterCost.recommended * 24)}/day
                         </p>
                       </div>
                       <div>
                         <p className="text-sm text-muted-foreground">Potential Savings</p>
                         <p className={cn("text-2xl font-bold", clusterCost.savings > 0 ? "text-green-600" : "text-yellow-600")}>
-                          {clusterCost.savings > 0 ? '-' : '+'}${Math.abs(clusterCost.savings).toFixed(2)}/hr
+                          {clusterCost.savings > 0 ? '-' : '+'}{currency(Math.abs(clusterCost.savings))}/hr
                         </p>
                         {clusterCost.current > 0 && (
                           <p className={cn("text-xs mt-1", clusterCost.savings > 0 ? "text-green-600" : "text-yellow-600")}>
                             {((clusterCost.savings / clusterCost.current) * 100).toFixed(1)}% {clusterCost.savings > 0 ? 'reduction' : 'increase'}
-                            {' • '}${(Math.abs(clusterCost.savings) * 24).toFixed(2)}/day
+                            {' • '}{currency(Math.abs(clusterCost.savings) * 24)}/day
                           </p>
                         )}
                       </div>
@@ -462,6 +471,7 @@ function App() {
         </div>
       </main>
     </div>
+    </CurrencyRegionContext.Provider>
   );
 }
 

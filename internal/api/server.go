@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/karpenter-optimizer/internal/awspricing"
 	"github.com/karpenter-optimizer/internal/config"
 	"github.com/karpenter-optimizer/internal/history"
 	"github.com/karpenter-optimizer/internal/kubernetes"
@@ -333,6 +334,8 @@ func (s *Server) getConfig(c *gin.Context) {
 		},
 		"aws": gin.H{
 			"pricingApi": "enabled", // AWS Pricing API is always enabled
+			"region":     s.config.AWSRegion,
+			"currency":   awspricing.PricingCurrencyForRegion(s.config.AWSRegion),
 		},
 	}
 
@@ -456,6 +459,7 @@ func (s *Server) getRecommendations(c *gin.Context) {
 			"current":     currentClusterCost,
 			"recommended": recommendedClusterCost,
 			"savings":     currentClusterCost - recommendedClusterCost,
+			"currency":    awspricing.PricingCurrencyForRegion(s.config.AWSRegion),
 		},
 		"note": "Recommendations based on actual NodePool capacity and node usage data",
 	})
@@ -569,6 +573,7 @@ func (s *Server) getRecommendationsFromClusterSummarySSE(c *gin.Context) {
 			"current":     totalCurrentCost,
 			"recommended": recommendedClusterCost,
 			"savings":     totalCurrentCost - recommendedClusterCost,
+			"currency":    awspricing.PricingCurrencyForRegion(s.config.AWSRegion),
 		},
 		"clusterNodes": gin.H{
 			"current":     totalCurrentNodes,
@@ -1034,6 +1039,7 @@ func (s *Server) getNodeDisruptions(c *gin.Context) {
 		"totalCostPerHour": totalCostPerHour,
 		"totalCostPerDay":  totalCostPerHour * 24,
 		"byNodePool":       byNodePool,
+		"currency":         awspricing.PricingCurrencyForRegion(s.config.AWSRegion),
 	}
 
 	c.JSON(200, gin.H{

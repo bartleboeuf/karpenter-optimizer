@@ -59,6 +59,8 @@ Karpenter Optimizer is a two-tier application consisting of a React frontend, a 
 - **RBAC**: Requires read access to NodePools, nodes, pods
 
 ### AWS Pricing API
+
+Cost amounts follow the target AWS region's Pricing API currency. China regions (`cn-north-1` and `cn-northwest-1`) use CNY, while commercial AWS regions use USD. The `/api/v1/config` response exposes `aws.region` and `aws.currency` for frontend formatting. China pricing does not use USD hardcoded/family fallback estimates.
 - **Purpose**: Fetch real-time EC2 instance pricing
 - **Client**: Custom HTTP client with caching
 - **Fallback**: Hardcoded pricing map if API unavailable

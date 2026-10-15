@@ -8,6 +8,7 @@ import { Badge } from './ui/badge';
 import { Loader2, Sparkles, TrendingDown, Shield, Zap, Target } from 'lucide-react';
 import { cn } from '../lib/utils';
 import NodePoolCard from './NodePoolCard';
+import { useCurrencyFormatter } from '../lib/currency';
 
 // Use runtime configuration from window.ENV (set via config.js) or build-time env var
 const API_URL = (window.ENV && window.ENV.hasOwnProperty('REACT_APP_API_URL')) 
@@ -48,6 +49,7 @@ const STRATEGY_INFO = {
 };
 
 function AgentRecommendations({ onRecommendationsGenerated, onClusterCostUpdate }) {
+  const currency = useCurrencyFormatter();
   const [plans, setPlans] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -256,7 +258,7 @@ function AgentRecommendations({ onRecommendationsGenerated, onClusterCostUpdate 
                           </span>
                           {plan.estimatedSavings > 0 && (
                             <span className="text-green-600 font-semibold">
-                              Save ${plan.estimatedSavings.toFixed(2)}/hr
+                              Save {currency(plan.estimatedSavings)}/hr
                             </span>
                           )}
                           <span>

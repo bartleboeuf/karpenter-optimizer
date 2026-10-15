@@ -23,23 +23,24 @@ type ProgressCallback func(message string, progress float64)
 type PricingSource string
 
 const (
-	PricingSourceAWSPricingAPI PricingSource = "aws-pricing-api"
-	PricingSourceHardcoded     PricingSource = "hardcoded"
+	PricingSourceAWSPricingAPI  PricingSource = "aws-pricing-api"
+	PricingSourceHardcoded      PricingSource = "hardcoded"
 	PricingSourceFamilyEstimate PricingSource = "family-estimate"
 	PricingSourceUnknown        PricingSource = "unknown"
 )
 
 // PricingResult contains cost information and its source
 type PricingResult struct {
-	Cost   float64       `json:"cost"`
-	Source PricingSource `json:"source"`
+	Cost     float64       `json:"cost"`
+	Currency string        `json:"currency"`
+	Source   PricingSource `json:"source"`
 }
 
 type Recommender struct {
-	config       *config.Config
-	k8sClient    *kubernetes.Client
-	llmClient *ollama.Client
-	awsPricing   *awspricing.Client // AWS Pricing API client
+	config     *config.Config
+	k8sClient  *kubernetes.Client
+	llmClient  *ollama.Client
+	awsPricing *awspricing.Client // AWS Pricing API client
 }
 
 // HasLLM returns true if LLM client is configured and available
@@ -56,7 +57,7 @@ func NewRecommender(cfg *config.Config) *Recommender {
 		llmURL = cfg.OllamaURL
 		llmModel = cfg.OllamaModel
 	}
-	
+
 	// Bedrock needs no URL (it uses the AWS SDK), so create the client for it
 	// explicitly instead of relying on the default URL from config.Load().
 	if llmURL != "" || cfg.LLMProvider == "bedrock" {
@@ -90,9 +91,9 @@ func NewRecommender(cfg *config.Config) *Recommender {
 	}
 
 	return &Recommender{
-		config:       cfg,
-		llmClient:    llmClient,
-		awsPricing:   awsPricingClient,
+		config:     cfg,
+		llmClient:  llmClient,
+		awsPricing: awsPricingClient,
 	}
 }
 
@@ -1274,7 +1275,7 @@ func (r *Recommender) optimizeNodePool(np kubernetes.NodePoolInfo, workloads []W
 	// Only recommend GPU if workloads actually need GPU
 	if maxGPU == 0 {
 		// No GPU needed - use regular instances
-		cpuPerNode := math.Max(totalCPU/4.0, 1.0) // Rough estimate for general purpose nodes, minimum 1
+		cpuPerNode := math.Max(totalCPU/4.0, 1.0)       // Rough estimate for general purpose nodes, minimum 1
 		memoryPerNode := math.Max(totalMemory/8.0, 1.0) // Minimum 1
 
 		recommendedInstanceTypes := r.selectInstanceTypes(cpuPerNode, memoryPerNode, 0) // Explicitly 0 GPU
@@ -1389,7 +1390,7 @@ func (r *Recommender) optimizeNodePool(np kubernetes.NodePoolInfo, workloads []W
 	} else {
 		// GPU workloads - handle separately
 		// Calculate instance types based on actual CPU/memory requirements, not hardcoded values
-		cpuPerNode := math.Max(totalCPU/4.0, 1.0) // Minimum 1
+		cpuPerNode := math.Max(totalCPU/4.0, 1.0)       // Minimum 1
 		memoryPerNode := math.Max(totalMemory/8.0, 1.0) // Minimum 1
 
 		recommendedInstanceTypes := r.selectInstanceTypes(cpuPerNode, memoryPerNode, maxGPU)
@@ -1753,7 +1754,7 @@ func (r *Recommender) generateRecommendationForGroup(group []Workload, index int
 	capacityType := r.selectCapacityType(group, false) // Not checking overprovisioning in this path
 	architecture := r.selectArchitecture(group)
 
-		recommendedCost := r.estimateCost(context.Background(), instanceTypes, capacityType, nodesNeeded)
+	recommendedCost := r.estimateCost(context.Background(), instanceTypes, capacityType, nodesNeeded)
 
 	// Try to get actual current state from existing NodePools
 	var currentState *CurrentState
@@ -2096,7 +2097,7 @@ func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes 
 	// Calculate cost like eks-node-viewer: distribute nodes across instance types and sum costs
 	// This matches how eks-node-viewer calculates: cost per node based on instance type, then sum
 	if len(instanceTypes) == 0 || nodeCount == 0 {
-		return PricingResult{Cost: 0.0, Source: PricingSourceUnknown}, make(map[string]PricingSource)
+		return PricingResult{Cost: 0.0, Currency: awspricing.PricingCurrencyForRegion(r.config.AWSRegion), Source: PricingSourceUnknown}, make(map[string]PricingSource)
 	}
 
 	// Distribute nodes evenly across instance types (like Karpenter does)
@@ -2113,9 +2114,11 @@ func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes 
 		var priceFound bool
 		var source = PricingSourceUnknown
 
-		// First, check hardcoded prices (no API call needed)
+		// Hardcoded prices and family estimates are USD-based. Do not use them
+		// for China regions, where AWS Pricing API returns CNY amounts.
 		// This reduces AWS Pricing API calls significantly for common instance types
-		if cost, ok := onDemandPrices[itLower]; ok {
+		isChinaRegion := strings.HasPrefix(r.config.AWSRegion, "cn-")
+		if cost, ok := onDemandPrices[itLower]; ok && !isChinaRegion {
 			instanceCost = cost
 			priceFound = true
 			source = PricingSourceHardcoded
@@ -2148,7 +2151,7 @@ func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes 
 		}
 
 		// If still not found, try family estimation
-		if !priceFound {
+		if !priceFound && !isChinaRegion {
 			instanceCost = r.estimateCostFromFamily(it)
 			if instanceCost > 0 {
 				priceFound = true
@@ -2156,14 +2159,14 @@ func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes 
 			}
 		}
 
-	// Skip this instance type if we couldn't find a price
+		// Skip this instance type if we couldn't find a price
 		if !priceFound {
 			continue
 		}
 
 		// Track source for this instance type
 		instanceTypeSources[it] = source
-		
+
 		// Set overall source (prefer AWS Pricing API if any instance type used it)
 		if source == PricingSourceAWSPricingAPI {
 			overallSource = PricingSourceAWSPricingAPI
@@ -2191,10 +2194,10 @@ func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes 
 
 	// If no prices were found, return unknown source
 	if overallSource == PricingSourceUnknown && totalCost == 0 {
-		return PricingResult{Cost: 0.0, Source: PricingSourceUnknown}, instanceTypeSources
+		return PricingResult{Cost: 0.0, Currency: awspricing.PricingCurrencyForRegion(r.config.AWSRegion), Source: PricingSourceUnknown}, instanceTypeSources
 	}
 
-	return PricingResult{Cost: totalCost, Source: overallSource}, instanceTypeSources
+	return PricingResult{Cost: totalCost, Currency: awspricing.PricingCurrencyForRegion(r.config.AWSRegion), Source: overallSource}, instanceTypeSources
 }
 
 // estimateCostFromFamily estimates cost based on instance family and size

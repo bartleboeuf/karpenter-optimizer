@@ -43,6 +43,55 @@ func TestChinaPricingRegionConfiguration(t *testing.T) {
 	}
 }
 
+func TestPricingCurrencyForRegion(t *testing.T) {
+	tests := []struct {
+		region string
+		want   string
+	}{
+		{region: "cn-north-1", want: "CNY"},
+		{region: "cn-northwest-1", want: "CNY"},
+		{region: "us-east-1", want: "USD"},
+		{region: "eu-west-1", want: "USD"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.region, func(t *testing.T) {
+			if got := PricingCurrencyForRegion(tt.region); got != tt.want {
+				t.Errorf("PricingCurrencyForRegion(%q) = %q, want %q", tt.region, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractPriceFromDimensionUsesRegionCurrency(t *testing.T) {
+	dimension := map[string]interface{}{
+		"pricePerUnit": map[string]interface{}{
+			"USD": "0.12",
+			"CNY": "0.84",
+		},
+	}
+	tests := []struct {
+		region string
+		want   float64
+	}{
+		{region: "cn-north-1", want: 0.84},
+		{region: "us-east-1", want: 0.12},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.region, func(t *testing.T) {
+			client := &Client{region: tt.region}
+			got, err := client.extractPriceFromDimension(dimension)
+			if err != nil {
+				t.Fatalf("extractPriceFromDimension() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("extractPriceFromDimension() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNonChinaPricingEndpointsRemainUnchanged(t *testing.T) {
 	if got := pricingAPIEndpoint("us-east-1"); got != "" {
 		t.Errorf("pricingAPIEndpoint(us-east-1) = %q, want no override", got)

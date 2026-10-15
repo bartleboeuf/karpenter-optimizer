@@ -11,6 +11,7 @@ import Sparkline from './Sparkline';
 import { RefreshCw, Zap, Loader2 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { getCacheStats } from '../lib/pricingCache';
+import { useCurrencyFormatter } from '../lib/currency';
 
 // Use runtime configuration from window.ENV (set via config.js) or build-time env var
 const API_URL = (window.ENV && window.ENV.hasOwnProperty('REACT_APP_API_URL')) 
@@ -20,6 +21,7 @@ const API_URL = (window.ENV && window.ENV.hasOwnProperty('REACT_APP_API_URL'))
 // ClusterTrends renders sparklines for CPU %, memory %, GPU memory % and
 // estimated cost over the selected window (1h / 6h / 24h).
 function ClusterTrends({ API_URL }) {
+  const currency = useCurrencyFormatter();
   const [window, setWindow] = useState('6h');
   const [points, setPoints] = useState([]);
 
@@ -56,7 +58,7 @@ function ClusterTrends({ API_URL }) {
       gpu: toPoints((p) =>
         p.gpuMemTotalMiB > 0 ? (p.gpuMemUsedMiB / p.gpuMemTotalMiB) * 100 : 0,
       ),
-      cost: toPoints((p) => p.costUSDPerHour || 0),
+      cost: toPoints((p) => p.costPerHour ?? p.costUSDPerHour ?? 0),
     };
   }, [points]);
 
@@ -68,7 +70,7 @@ function ClusterTrends({ API_URL }) {
       label: 'Est. cost',
       data: series.cost,
       stroke: '#22c55e',
-      fmt: (v) => `$${v.toFixed(2)}/hr ($${(v * 24).toFixed(0)}/day)`,
+      fmt: (v) => `${currency(v)}/hr (${currency(v * 24)}/day)`,
     },
   ];
 
@@ -107,6 +109,7 @@ function ClusterTrends({ API_URL }) {
 }
 
 function GlobalClusterSummary({ onRecommendationsGenerated, onClusterCostUpdate }) {
+  const currency = useCurrencyFormatter();
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -391,19 +394,19 @@ function GlobalClusterSummary({ onRecommendationsGenerated, onClusterCostUpdate 
                   <div>
                     <p className="text-white/80 text-xs mb-1">Current Cost</p>
                     <p className="text-white text-2xl font-bold">
-                      ${clusterCost.current.toFixed(2)}/hr
+                      {currency(clusterCost.current)}/hr
                     </p>
                   </div>
                   <div>
                     <p className="text-white/80 text-xs mb-1">Recommended Cost</p>
                     <p className="text-white text-2xl font-bold">
-                      ${clusterCost.recommended.toFixed(2)}/hr
+                      {currency(clusterCost.recommended)}/hr
                     </p>
                   </div>
                   <div>
                     <p className="text-white/80 text-xs mb-1">Potential Savings</p>
                     <p className={cn("text-2xl font-bold", clusterCost.savings > 0 ? "text-green-300" : "text-yellow-300")}>
-                      {clusterCost.savings > 0 ? '-' : '+'}${Math.abs(clusterCost.savings).toFixed(2)}/hr
+                      {clusterCost.savings > 0 ? '-' : '+'}{currency(Math.abs(clusterCost.savings))}/hr
                     </p>
                     {clusterCost.current > 0 && (
                       <p className="text-white/80 text-xs mt-1">
@@ -441,10 +444,10 @@ function GlobalClusterSummary({ onRecommendationsGenerated, onClusterCostUpdate 
                 <CardContent className="pt-6">
                   <p className="text-sm text-muted-foreground">Estimated Cost</p>
                   <p className="text-2xl font-bold text-green-600">
-                    ${summary.estimatedCost.toFixed(2)}/hr
+                    {currency(summary.estimatedCost)}/hr
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    ${(summary.estimatedCost * 24).toFixed(2)}/day
+                    {currency(summary.estimatedCost * 24)}/day
                   </p>
                   {summary.pricingSource && (
                     <p className="text-xs mt-1">

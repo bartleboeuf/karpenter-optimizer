@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/karpenter-optimizer/internal/awspricing"
 	"github.com/karpenter-optimizer/internal/history"
 )
 
@@ -133,7 +134,8 @@ func (s *Server) sampleCluster() {
 		GPUAllocated:      totalGPUAllocated,
 		Nodes:             len(nodes),
 		Pods:              totalPods,
-		CostUSDPerHour:    costPerHour,
+		CostPerHour:       costPerHour,
+		Currency:          awspricing.PricingCurrencyForRegion(s.config.AWSRegion),
 	})
 }
 

@@ -76,6 +76,16 @@ func getLocationForRegion(region string) string {
 	return "EU (Ireland)"
 }
 
+// PricingCurrencyForRegion returns the currency used by AWS Pricing for the
+// target region. China partition pricing is denominated in CNY; commercial
+// partition prices are denominated in USD.
+func PricingCurrencyForRegion(region string) string {
+	if strings.HasPrefix(region, "cn-") {
+		return "CNY"
+	}
+	return "USD"
+}
+
 // pricingAPIEndpoint returns a region-specific endpoint override when the
 // Pricing API is hosted outside the standard AWS commercial partition.
 func pricingAPIEndpoint(region string) string {
@@ -612,10 +622,10 @@ func (c *Client) extractPriceFromTerms(terms map[string]interface{}, productID, 
 				continue
 			}
 
-			// Try USD first, then other currencies
-			if usdPrice, ok := pricePerUnit["USD"].(string); ok {
+			currency := PricingCurrencyForRegion(c.region)
+			if unitPrice, ok := pricePerUnit[currency].(string); ok {
 				var price float64
-				if _, err := fmt.Sscanf(usdPrice, "%f", &price); err == nil && price > 0 {
+				if _, err := fmt.Sscanf(unitPrice, "%f", &price); err == nil && price > 0 {
 					return price, nil
 				}
 			}
@@ -641,14 +651,14 @@ func (c *Client) extractPriceFromDimension(priceData interface{}) (float64, erro
 		return 0, fmt.Errorf("pricePerUnit not found in dimension, available keys: %v", keys)
 	}
 
-	// Try USD first, then other currencies
-	if usdPrice, ok := pricePerUnit["USD"].(string); ok {
+	currency := PricingCurrencyForRegion(c.region)
+	if unitPrice, ok := pricePerUnit[currency].(string); ok {
 		var price float64
-		_, err := fmt.Sscanf(usdPrice, "%f", &price)
+		_, err := fmt.Sscanf(unitPrice, "%f", &price)
 		if err == nil && price > 0 {
 			return price, nil
 		}
-		return 0, fmt.Errorf("failed to parse USD price string '%s': %v", usdPrice, err)
+		return 0, fmt.Errorf("failed to parse %s price string '%s': %v", currency, unitPrice, err)
 	}
 
 	// Log available currencies for debugging
@@ -656,7 +666,7 @@ func (c *Client) extractPriceFromDimension(priceData interface{}) (float64, erro
 	for k := range pricePerUnit {
 		currencies = append(currencies, k)
 	}
-	return 0, fmt.Errorf("USD not found in pricePerUnit, available currencies: %v", currencies)
+	return 0, fmt.Errorf("%s not found in pricePerUnit, available currencies: %v", currency, currencies)
 }
 
 // QueryPricingAPIWithFilters queries AWS Pricing API with specific filters
