@@ -1,8 +1,13 @@
 package awspricing
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/aws/smithy-go"
 )
@@ -146,5 +151,46 @@ func TestIsRetryablePricingError(t *testing.T) {
 				t.Errorf("isRetryablePricingError(%v) = %t, want %t", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGetAvailableEC2InstanceTypesFiltersTargetLocation(t *testing.T) {
+	index := `{"products":{
+		"beijing":{"attributes":{"productFamily":"Compute Instance","instanceType":"m6i.large","location":"China (Beijing)","processorArchitecture":"64-bit"}},
+		"ningxia":{"attributes":{"productFamily":"Compute Instance","instanceType":"m6a.large","location":"China (Ningxia)","processorArchitecture":"64-bit"}},
+		"other":{"attributes":{"productFamily":"Compute Instance","instanceType":"m5.large","location":"US East (N. Virginia)","processorArchitecture":"64-bit"}}
+	}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(index))
+	}))
+	defer server.Close()
+
+	client := &Client{
+		baseURL:            server.URL,
+		region:             "cn-north-1",
+		longHttpClient:     server.Client(),
+		instanceTypesCache: make(map[string]cachedInstanceTypes),
+	}
+
+	got, err := client.GetAvailableEC2InstanceTypes(context.Background(), "amd64")
+	if err != nil {
+		t.Fatalf("GetAvailableEC2InstanceTypes() error = %v", err)
+	}
+	if len(got) != 1 || got[0] != "m6i.large" {
+		t.Fatalf("GetAvailableEC2InstanceTypes() = %v, want [m6i.large]", got)
+	}
+}
+
+func TestGetProductPriceReturnsCachedRegionalMiss(t *testing.T) {
+	miss := fmt.Errorf("%w for instance type m6a.xlarge", ErrNoPricingFound)
+	client := &Client{
+		cache: make(map[string]cachedPrice),
+		cacheTTL: time.Hour,
+	}
+	client.cache["m6a.xlarge-on-demand"] = cachedPrice{err: miss, expiresAt: time.Now().Add(time.Hour)}
+
+	_, err := client.GetProductPrice(context.Background(), "m6a.xlarge", "on-demand")
+	if !errors.Is(err, ErrNoPricingFound) {
+		t.Fatalf("GetProductPrice() error = %v, want cached regional miss", err)
 	}
 }

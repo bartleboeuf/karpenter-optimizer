@@ -520,7 +520,11 @@ func (r *Recommender) findOptimalInstanceTypesWithCapacityType(ctx context.Conte
 				continue
 			}
 			nodesNeeded := int(math.Ceil(math.Max(targetCPU/cpu, targetMemory/mem)))
-			cost := r.estimateCost(ctx, []string{it}, capType, nodesNeeded)
+			priceResult, _ := r.estimateCostWithSource(ctx, []string{it}, capType, nodesNeeded)
+			if priceResult.Source == PricingSourceUnknown || priceResult.Cost <= 0 {
+				continue
+			}
+			cost := priceResult.Cost
 			if cost < bestCost {
 				bestCost = cost
 				bestTypes = []string{it}
@@ -548,7 +552,11 @@ func (r *Recommender) findOptimalInstanceTypesWithCapacityType(ctx context.Conte
 				}
 
 				nodesNeeded := int(math.Ceil(math.Max(targetCPU/avgCPU, targetMemory/avgMemory)))
-				cost := r.estimateCost(ctx, combo, capType, nodesNeeded)
+				priceResult, sources := r.estimateCostWithSource(ctx, combo, capType, nodesNeeded)
+				if priceResult.Source == PricingSourceUnknown || priceResult.Cost <= 0 || len(sources) != len(combo) {
+					continue
+				}
+				cost := priceResult.Cost
 				if cost < bestCost {
 					bestCost = cost
 					bestTypes = combo
@@ -574,6 +582,7 @@ func (r *Recommender) findOptimalInstanceTypes(requiredCPU, requiredMemory float
 // getCandidateInstanceTypes returns candidate instance types based on architecture and requirements
 // Queries AWS Pricing API for available instance types instead of hardcoding
 func (r *Recommender) getCandidateInstanceTypes(architecture string, cpu, memory float64) []string {
+	isChinaRegion := r.config != nil && strings.HasPrefix(r.config.AWSRegion, "cn-")
 	// Try to get instance types from AWS Pricing API
 	if r.awsPricing != nil {
 		// Increase timeout to 60 seconds - querying many instance types can be slow
@@ -584,23 +593,53 @@ func (r *Recommender) getCandidateInstanceTypes(architecture string, cpu, memory
 		availableTypes, err := r.awsPricing.GetAvailableEC2InstanceTypes(ctx, architecture)
 		if err == nil && len(availableTypes) > 0 {
 			// Filter by CPU/Memory ratio and requirements
-			return r.filterInstanceTypesByRequirements(availableTypes, architecture, cpu, memory)
+			candidates := r.filterInstanceTypesByRequirements(availableTypes, architecture, cpu, memory)
+			if len(candidates) > 0 {
+				return candidates
+			}
 		}
 		// If AWS API fails, fall back to hardcoded list
 		if err != nil {
 			// Only log if it's not a context timeout (which is expected on slow connections)
 			if !strings.Contains(err.Error(), "context deadline exceeded") && !strings.Contains(err.Error(), "timeout") {
-				log.Printf("Warning: Failed to get instance types from AWS API: %v. Using fallback list.", err)
+				if isChinaRegion {
+					log.Printf("Warning: Failed to get region-specific instance types from AWS API: %v. Using non-AMD hardcoded candidates for China.", err)
+				} else {
+					log.Printf("Warning: Failed to get instance types from AWS API: %v. Using fallback list.", err)
+				}
 			} else {
-				log.Printf("Info: AWS Pricing API timed out. Using fallback instance types list. Subsequent requests will use cached data.")
+				if isChinaRegion {
+					log.Printf("Info: AWS Pricing API timed out. Using non-AMD hardcoded candidates for China.")
+				} else {
+					log.Printf("Info: AWS Pricing API timed out. Using fallback instance types list. Subsequent requests will use cached data.")
+				}
 			}
 		} else if len(availableTypes) == 0 {
-			log.Printf("Warning: AWS API returned empty instance types list for architecture %s. Using fallback list.", architecture)
+			log.Printf("Warning: AWS API returned empty instance types list for architecture %s.", architecture)
 		}
+	}
+	if isChinaRegion {
+		// Keep AMD-vendor families out of the China hardcoded fallback. The
+		// pricing API remains the source of regional prices for candidate scoring.
+		return filterAMDInstanceTypes(r.getHardcodedCandidateInstanceTypes(architecture, cpu, memory))
 	}
 
 	// Fallback to hardcoded list if AWS API is unavailable
 	return r.getHardcodedCandidateInstanceTypes(architecture, cpu, memory)
+}
+
+// filterAMDInstanceTypes removes AMD-vendor instance families (for example,
+// m6a, c6a, r6a, and t3a) from a candidate list. AWS uses the family suffix
+// "a" for these x86 families; this is distinct from the amd64 architecture.
+func filterAMDInstanceTypes(instanceTypes []string) []string {
+	filtered := make([]string, 0, len(instanceTypes))
+	for _, instanceType := range instanceTypes {
+		family, _, ok := strings.Cut(strings.ToLower(instanceType), ".")
+		if !ok || !strings.HasSuffix(family, "a") {
+			filtered = append(filtered, instanceType)
+		}
+	}
+	return filtered
 }
 
 // filterInstanceTypesByRequirements filters AWS instance types based on CPU/Memory requirements
@@ -643,32 +682,28 @@ func (r *Recommender) filterInstanceTypesByRequirements(availableTypes []string,
 		}
 	}
 
-	// Limit to reasonable number of candidates and sort by cost efficiency
+	// Sort by cost efficiency, placing candidates without a known regional
+	// price last so they cannot crowd valid types out of the bounded search.
+	sort.Slice(candidates, func(i, j int) bool {
+		costI, sourcesI := r.estimateCostWithSource(context.Background(), []string{candidates[i]}, "on-demand", 1)
+		costJ, sourcesJ := r.estimateCostWithSource(context.Background(), []string{candidates[j]}, "on-demand", 1)
+		knownI := costI.Source != PricingSourceUnknown && costI.Cost > 0 && len(sourcesI) == 1
+		knownJ := costJ.Source != PricingSourceUnknown && costJ.Cost > 0 && len(sourcesJ) == 1
+		if knownI != knownJ {
+			return knownI
+		}
+		cpuI, memI := r.estimateInstanceCapacity(candidates[i])
+		cpuJ, memJ := r.estimateInstanceCapacity(candidates[j])
+		efficiencyI := math.MaxFloat64
+		efficiencyJ := math.MaxFloat64
+		if knownI {
+			efficiencyI = costI.Cost / (cpuI*0.7 + memI*0.3)
+			efficiencyJ = costJ.Cost / (cpuJ*0.7 + memJ*0.3)
+		}
+		return efficiencyI < efficiencyJ
+	})
 	if len(candidates) > 20 {
-		// Sort by cost efficiency and take top 20
-		sort.Slice(candidates, func(i, j int) bool {
-			cpuI, memI := r.estimateInstanceCapacity(candidates[i])
-			cpuJ, memJ := r.estimateInstanceCapacity(candidates[j])
-			costI := r.estimateCost(context.Background(), []string{candidates[i]}, "on-demand", 1)
-			costJ := r.estimateCost(context.Background(), []string{candidates[j]}, "on-demand", 1)
-
-			efficiencyI := costI / (cpuI*0.7 + memI*0.3)
-			efficiencyJ := costJ / (cpuJ*0.7 + memJ*0.3)
-			return efficiencyI < efficiencyJ
-		})
 		candidates = candidates[:20]
-	} else {
-		// Sort by cost efficiency
-		sort.Slice(candidates, func(i, j int) bool {
-			cpuI, memI := r.estimateInstanceCapacity(candidates[i])
-			cpuJ, memJ := r.estimateInstanceCapacity(candidates[j])
-			costI := r.estimateCost(context.Background(), []string{candidates[i]}, "on-demand", 1)
-			costJ := r.estimateCost(context.Background(), []string{candidates[j]}, "on-demand", 1)
-
-			efficiencyI := costI / (cpuI*0.7 + memI*0.3)
-			efficiencyJ := costJ / (cpuJ*0.7 + memJ*0.3)
-			return efficiencyI < efficiencyJ
-		})
 	}
 
 	return candidates
@@ -704,6 +739,9 @@ func (r *Recommender) getHardcodedCandidateInstanceTypes(architecture string, cp
 			candidates = []string{"m6i.xlarge", "m6i.2xlarge", "m6i.4xlarge", "m6i.8xlarge", "m6a.xlarge", "m6a.2xlarge", "m6a.4xlarge", "t3.xlarge", "t3.2xlarge"}
 		}
 	}
+	if r.config != nil && strings.HasPrefix(r.config.AWSRegion, "cn-") {
+		candidates = filterAMDInstanceTypes(candidates)
+	}
 
 	// Filter out invalid instance types and sort by cost efficiency
 	validCandidates := []string{}
@@ -712,6 +750,16 @@ func (r *Recommender) getHardcodedCandidateInstanceTypes(architecture string, cp
 		if instCPU > 0 && instMem > 0 {
 			validCandidates = append(validCandidates, it)
 		}
+	}
+	if r.config != nil && strings.HasPrefix(r.config.AWSRegion, "cn-") {
+		pricedCandidates := validCandidates[:0]
+		for _, it := range validCandidates {
+			price, sources := r.estimateCostWithSource(context.Background(), []string{it}, "on-demand", 1)
+			if price.Cost > 0 && price.Source != PricingSourceUnknown && len(sources) == 1 {
+				pricedCandidates = append(pricedCandidates, it)
+			}
+		}
+		validCandidates = pricedCandidates
 	}
 
 	// Sort by cost efficiency (cost per unit of capacity)

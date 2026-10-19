@@ -28,6 +28,10 @@ import (
 // typically 60-90% cheaper than on-demand, and 25% of on-demand is a common middle estimate.
 const SpotDiscountFactor = 0.25
 
+// ErrNoPricingFound indicates that a product is not priced in the target region.
+// This is an expected result when an instance type is unavailable regionally.
+var ErrNoPricingFound = errors.New("no pricing found")
+
 // getLocationForRegion maps AWS region to Pricing API location format
 func getLocationForRegion(region string) string {
 	locationMap := map[string]string{
@@ -183,6 +187,7 @@ type cachedInstanceTypes struct {
 
 type cachedPrice struct {
 	price     float64
+	err       error
 	expiresAt time.Time
 }
 
@@ -284,7 +289,7 @@ func (c *Client) GetProductPrice(ctx context.Context, instanceType, capacityType
 	if cached, ok := c.cache[cacheKey]; ok {
 		if time.Now().Before(cached.expiresAt) {
 			c.cacheMu.RUnlock()
-			return cached.price, nil
+			return cached.price, cached.err
 		}
 	}
 	c.cacheMu.RUnlock()
@@ -297,7 +302,14 @@ func (c *Client) GetProductPrice(ctx context.Context, instanceType, capacityType
 	// Make API call only if not in cache
 	price, err := c.queryGetProducts(ctx, instanceType, capacityType)
 	if err != nil {
-		log.Printf("Warning: Failed to get price for %s (%s): %v", instanceType, capacityType, err)
+		if errors.Is(err, ErrNoPricingFound) {
+			// Regional unavailability is expected and stable enough to negative-cache.
+			c.cacheMu.Lock()
+			c.cache[cacheKey] = cachedPrice{err: err, expiresAt: time.Now().Add(c.cacheTTL)}
+			c.cacheMu.Unlock()
+		} else {
+			log.Printf("Warning: Failed to get price for %s (%s): %v", instanceType, capacityType, err)
+		}
 		return 0, err
 	}
 
@@ -412,7 +424,7 @@ func (c *Client) queryGetProducts(ctx context.Context, instanceType, capacityTyp
 		if err == nil {
 			// Success! Parse and return the result
 			if len(result.PriceList) == 0 {
-				return 0, fmt.Errorf("no pricing found for instance type %s", instanceType)
+				return 0, fmt.Errorf("%w for instance type %s", ErrNoPricingFound, instanceType)
 			}
 
 			// Parse the first result (should be the only one)
@@ -798,6 +810,13 @@ func (c *Client) GetAvailableEC2InstanceTypes(ctx context.Context, architecture 
 
 		attributes, ok := productMap["attributes"].(map[string]interface{})
 		if !ok {
+			continue
+		}
+
+		// The index can include offerings outside the target location. Never
+		// advertise those as candidates for this region (especially China).
+		location, _ := attributes["location"].(string)
+		if location != getLocationForRegion(c.region) {
 			continue
 		}
 
