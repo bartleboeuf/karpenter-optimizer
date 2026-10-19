@@ -835,18 +835,15 @@ func (c *Client) GetAvailableEC2InstanceTypes(ctx context.Context, architecture 
 		// Filter by architecture if specified
 		if architecture != "" {
 			productArch, _ := attributes["processorArchitecture"].(string)
+			isARM := strings.Contains(strings.ToLower(productArch), "arm")
 			if architectureLower == "arm64" {
-				// ARM/Graviton instances
-				if !strings.Contains(strings.ToLower(productArch), "arm") &&
-					!strings.Contains(strings.ToLower(instanceType), "g") &&
-					!strings.Contains(strings.ToLower(instanceType), "gd") {
+				// AWS product metadata distinguishes ARM from x86 instance types.
+				if !isARM {
 					continue
 				}
 			} else if architectureLower == "amd64" || architectureLower == "x86_64" {
 				// x86 instances (exclude ARM)
-				if strings.Contains(strings.ToLower(productArch), "arm") ||
-					strings.Contains(strings.ToLower(instanceType), "g") ||
-					strings.Contains(strings.ToLower(instanceType), "gd") {
+				if isARM {
 					continue
 				}
 			}

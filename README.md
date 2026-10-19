@@ -159,7 +159,7 @@ The API will be available at `http://localhost:8080` and the frontend at `http:/
 - `LLM_MAX_TOKENS`: response token cap for Bedrock requests (optional; unset = the model's default maximum) — set it to bound the worst-case cost per request
 - `LITELLM_METRICS_API_KEY`: Bearer token for the LiteLLM proxy `/metrics` endpoint (optional; required by LiteLLM ≥ v1.85.0). When the gateway's metrics endpoint answers 401/403, the Serving tab shows an actionable hint pointing at this variable
 
-**Pricing note:** Cost estimates use live AWS Pricing API results when available. Dated fallback snapshots queried 2026-10-19 are available for selected `us-east-1` USD and China-region CNY instance types; they may become stale and should be refreshed periodically. Snapshots are only used when pricing cannot be queried, and not when the Pricing API explicitly returns no product. The US snapshot is not reused for other commercial regions. Spot pricing is an estimate based on a fixed discount from on-demand pricing, not a live Spot market quote.
+**Pricing note:** Cost estimates use live AWS Pricing API results when available. Instance-type discovery filters AWS Pricing index entries to the configured region and uses AWS `processorArchitecture` metadata to distinguish ARM from x86 types. Dated fallback snapshots queried 2026-10-19 are available for selected `us-east-1` USD and China-region CNY instance types; they may become stale and should be refreshed periodically. Snapshots are only used when pricing cannot be queried, and not when the Pricing API explicitly returns no product. The US snapshot is not reused for other commercial regions. Spot pricing is an estimate based on a fixed discount from on-demand pricing, not a live Spot market quote.
 
 ## 📖 Documentation
 
