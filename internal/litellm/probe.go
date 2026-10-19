@@ -24,43 +24,46 @@ type PodRef struct {
 	Port int32
 }
 
-// ModelAppStat is one (model, calling-app) usage cell: how many tokens and how
-// much spend a given app consumed on a given model. Derived from the
-// token/spend counters, which carry both `model` and `metadata_trace_name` on
-// the same series (no bridging). Requests-without-a-trace are "(unattributed)".
-type ModelAppStat struct {
-	App          string   `json:"app"`
+// ModelSplitStat is one (model, split-value) usage cell: how many tokens and
+// how much spend a given app / API key / team consumed on a given model.
+// Derived from the token/spend counters, which carry both `model` and the
+// split label on the same series (no bridging). Values without a real label
+// (e.g. metadata_trace_name="None") are grouped as "(unattributed)".
+type ModelSplitStat struct {
+	Name         string   `json:"name"`
 	TokensTotal  int64    `json:"tokensTotal"`
 	TokensInput  int64    `json:"tokensInput"`
 	TokensOutput int64    `json:"tokensOutput"`
-	Spend        *float64 `json:"spend,omitempty"` // cumulative USD for this app on this model
+	Spend        *float64 `json:"spend,omitempty"` // cumulative USD for this split value on this model
 }
 
 // ModelStat is the per-model breakdown of gateway traffic.
 type ModelStat struct {
-	Model          string         `json:"model"`
-	RequestsTotal  int64          `json:"requestsTotal"`
-	FailedRequests int64          `json:"failedRequests"`
-	ErrorRatePct   *float64       `json:"errorRatePct,omitempty"` // failed/total, 0-100
-	RequestsPerSec *float64       `json:"requestsPerSec,omitempty"`
-	TokensPerSec   *float64       `json:"tokensPerSec,omitempty"`
-	E2EP95Seconds  *float64       `json:"e2eP95Seconds,omitempty"`  // p95 end-to-end latency (model + gateway)
-	TTFTP95Seconds *float64       `json:"ttftP95Seconds,omitempty"` // p95 time-to-first-token
-	Spend          *float64       `json:"spend,omitempty"`          // cumulative USD attributed to this model
-	Apps           []ModelAppStat `json:"apps,omitempty"`           // per-calling-app breakdown for this model
+	Model          string           `json:"model"`
+	RequestsTotal  int64            `json:"requestsTotal"`
+	FailedRequests int64            `json:"failedRequests"`
+	ErrorRatePct   *float64         `json:"errorRatePct,omitempty"` // failed/total, 0-100
+	RequestsPerSec *float64         `json:"requestsPerSec,omitempty"`
+	TokensPerSec   *float64         `json:"tokensPerSec,omitempty"`
+	E2EP95Seconds  *float64         `json:"e2eP95Seconds,omitempty"`  // p95 end-to-end latency (model + gateway)
+	TTFTP95Seconds *float64         `json:"ttftP95Seconds,omitempty"` // p95 time-to-first-token
+	Spend          *float64         `json:"spend,omitempty"`          // cumulative USD attributed to this model
+	Apps           []ModelSplitStat `json:"apps,omitempty"`           // per-calling-app (metadata_trace_name) breakdown
+	APIKeys        []ModelSplitStat `json:"apiKeys,omitempty"`        // per API-key-alias breakdown
+	Teams          []ModelSplitStat `json:"teams,omitempty"`          // per team-alias breakdown
 }
 
-// AppStat is the per-app breakdown of gateway traffic, keyed by the
-// `metadata_trace_name` label (the calling application, set by clients via
-// metadata; requests without one are grouped as "(unattributed)").
-type AppStat struct {
-	App           string   `json:"app"`
+// SplitStat is the breakdown of gateway traffic by one calling dimension —
+// app (metadata_trace_name), API key (api_key_alias) or team (team_alias).
+// Requests without a real label value are grouped as "(unattributed)".
+type SplitStat struct {
+	Name          string   `json:"name"`
 	RequestsTotal int64    `json:"requestsTotal"`
 	TokensTotal   int64    `json:"tokensTotal"`
 	TokensInput   int64    `json:"tokensInput"`
 	TokensOutput  int64    `json:"tokensOutput"`
 	TokensPerSec  *float64 `json:"tokensPerSec,omitempty"`
-	Spend         *float64 `json:"spend,omitempty"` // cumulative USD attributed to this app
+	Spend         *float64 `json:"spend,omitempty"` // cumulative USD attributed to this split value
 }
 
 // GatewayHealth is the aggregated health of the LiteLLM gateway fleet.
@@ -86,8 +89,25 @@ type GatewayHealth struct {
 	OverheadP95Seconds  *float64 `json:"overheadP95Seconds,omitempty"`  // p95 gateway processing overhead
 	Spend               *float64 `json:"spend,omitempty"`               // cumulative USD
 
-	Models []ModelStat `json:"models,omitempty"`
-	Apps   []AppStat   `json:"apps,omitempty"` // per calling-app (metadata_trace_name) usage
+	Models  []ModelStat `json:"models,omitempty"`
+	Apps    []SplitStat `json:"apps,omitempty"`    // per calling-app (metadata_trace_name) usage
+	APIKeys []SplitStat `json:"apiKeys,omitempty"` // per API-key-alias (api_key_alias) usage
+	Teams   []SplitStat `json:"teams,omitempty"`   // per team-alias (team_alias) usage
+}
+
+// splitDim identifies one breakdown dimension: which label the counters are
+// grouped by, the JSON field that carries its top-level table, and the opaque
+// rate-state prefix (kept distinct per dimension so rates never collide).
+type splitDim struct {
+	label    string
+	rateKey  string
+	topField string // GatewayHealth field / ModelStat field the table lands in
+}
+
+var splitDims = []splitDim{
+	{label: "metadata_trace_name", rateKey: "aptok", topField: "apps"},
+	{label: "api_key_alias", rateKey: "aptokkey", topField: "apiKeys"},
+	{label: "team_alias", rateKey: "aptokteam", topField: "teams"},
 }
 
 // Prober keeps the last sample of every counter it has seen (per replica,
@@ -129,10 +149,11 @@ var modelMetrics = []string{
 	"litellm_spend_metric",
 }
 
-// appMetrics are the LiteLLM metrics that carry a `metadata_trace_name` label.
-// We union their raw label values to discover every calling app; a given app
-// may appear on only a subset of these metrics.
-var appMetrics = []string{
+// splitDimMetrics are the LiteLLM metrics that carry the split-dimension labels
+// (metadata_trace_name / api_key_alias / team_alias). We union their raw label
+// values to discover every split value; a given value may appear on only a
+// subset of these metrics.
+var splitDimMetrics = []string{
 	"litellm_proxy_total_requests_metric",
 	"litellm_proxy_failed_requests_metric",
 	"litellm_total_tokens_metric",
@@ -147,8 +168,7 @@ var appMetrics = []string{
 const (
 	reqLabelRequested = "requested_model"
 	reqLabelModel     = "model"
-	appLabel          = "metadata_trace_name"
-	unattributedApp   = "(unattributed)"
+	unattributedName  = "(unattributed)"
 )
 
 // ProbeAll scrapes every replica and aggregates the results.
@@ -161,7 +181,11 @@ func (p *Prober) ProbeAll(ctx context.Context, refs []PodRef) GatewayHealth {
 		hasFleetReq                bool
 	)
 	models := map[string]*modelAcc{}
-	apps := map[string]*appAcc{}
+	// One accumulator per split dimension, keyed by the raw label value.
+	splits := map[string]map[string]*splitAcc{}
+	for _, d := range splitDims {
+		splits[d.label] = map[string]*splitAcc{}
+	}
 
 	for _, ref := range refs {
 		replicaKey := fmt.Sprintf("%s:%d", ref.IP, ref.Port)
@@ -240,81 +264,63 @@ func (p *Prober) ProbeAll(ctx context.Context, refs []PodRef) GatewayHealth {
 			}
 		}
 
-		// Per-app breakdown: token/request/spend metrics are labeled directly
-		// with `metadata_trace_name`, so no bridging is needed. We iterate the
-		// raw label values (the real metric label is "None", not the display
-		// key) and bucket them by normalized app key.
-		for _, raw := range appRawValues(m) {
-			key := appKey(raw)
-			acc := apps[key]
-			if acc == nil {
-				acc = &appAcc{app: key}
-				apps[key] = acc
-			}
-			if v, ok := m.TotalByLabel("litellm_proxy_total_requests_metric", appLabel, raw); ok {
-				acc.requests += v
-			}
-			if v, ok := m.TotalByLabel("litellm_total_tokens_metric", appLabel, raw); ok {
-				acc.tokens += v
-				if r, ok := p.observeRate(replicaKey+"|aptok|"+raw, v); ok {
-					acc.addRate(&acc.tokRate, r)
+		// Per-dimension breakdown (app / API key / team): the request, token
+		// and spend metrics are all labeled directly with each split label, so
+		// every cell is summed straight off the series — no bridging.
+		for _, dim := range splitDims {
+			bucket := splits[dim.label]
+			for _, raw := range labelValuesAcross(m, dim.label) {
+				key := splitKey(raw)
+				acc := bucket[key]
+				if acc == nil {
+					acc = &splitAcc{name: key}
+					bucket[key] = acc
 				}
-			}
-			if v, ok := m.TotalByLabel("litellm_input_tokens_metric", appLabel, raw); ok {
-				acc.tokensIn += v
-			}
-			if v, ok := m.TotalByLabel("litellm_output_tokens_metric", appLabel, raw); ok {
-				acc.tokensOut += v
-			}
-			if v, ok := m.TotalByLabel("litellm_spend_metric", appLabel, raw); ok {
-				setSum(&acc.spend, v)
+				if v, ok := m.TotalByLabel("litellm_proxy_total_requests_metric", dim.label, raw); ok {
+					acc.requests += v
+				}
+				if v, ok := m.TotalByLabel("litellm_total_tokens_metric", dim.label, raw); ok {
+					acc.tokens += v
+					if r, ok := p.observeRate(replicaKey+"|"+dim.rateKey+"|"+raw, v); ok {
+						acc.addRate(&acc.tokRate, r)
+					}
+				}
+				if v, ok := m.TotalByLabel("litellm_input_tokens_metric", dim.label, raw); ok {
+					acc.tokensIn += v
+				}
+				if v, ok := m.TotalByLabel("litellm_output_tokens_metric", dim.label, raw); ok {
+					acc.tokensOut += v
+				}
+				if v, ok := m.TotalByLabel("litellm_spend_metric", dim.label, raw); ok {
+					setSum(&acc.spend, v)
+				}
 			}
 		}
 
-		// Model × app cross-tab: the token/spend counters carry both `model`
-		// and `metadata_trace_name` on the same series, so each (model, app)
-		// cell is summed directly — no bridging. Feeds the expandable per-model
-		// app detail in the UI.
-		type cellKey struct{ model, raw string }
-		totals := map[cellKey]float64{}
-		inputs := map[cellKey]float64{}
-		outputs := map[cellKey]float64{}
-		spends := map[cellKey]float64{}
-		hasSpend := map[cellKey]bool{}
-		for _, pr := range m.LabelPairValues("litellm_total_tokens_metric", "model", appLabel) {
-			k := cellKey{pr.ValueA, pr.ValueB}
-			totals[k] += pr.Value
-		}
-		for _, pr := range m.LabelPairValues("litellm_input_tokens_metric", "model", appLabel) {
-			inputs[cellKey{pr.ValueA, pr.ValueB}] += pr.Value
-		}
-		for _, pr := range m.LabelPairValues("litellm_output_tokens_metric", "model", appLabel) {
-			outputs[cellKey{pr.ValueA, pr.ValueB}] += pr.Value
-		}
-		for _, pr := range m.LabelPairValues("litellm_spend_metric", "model", appLabel) {
-			k := cellKey{pr.ValueA, pr.ValueB}
-			spends[k] += pr.Value
-			hasSpend[k] = true
-		}
-		for k, tot := range totals {
-			acc := models[k.model]
-			if acc == nil {
-				continue // model has no latency/spend series; nothing to attach to
+		// Model × split cross-tab: the token/spend counters carry both `model`
+		// and the split label on the same series, so each (model, value) cell is
+		// summed directly. Feeds the expandable per-model detail in the UI.
+		for _, dim := range splitDims {
+			cellTotals := map[modelCell]float64{}
+			cellInputs := map[modelCell]float64{}
+			cellOutputs := map[modelCell]float64{}
+			cellSpends := map[modelCell]float64{}
+			cellHasSpend := map[modelCell]bool{}
+			for _, pr := range m.LabelPairValues("litellm_total_tokens_metric", "model", dim.label) {
+				cellTotals[modelCell{pr.ValueA, pr.ValueB}] += pr.Value
 			}
-			if acc.apps == nil {
-				acc.apps = map[string]*modelAppAcc{}
+			for _, pr := range m.LabelPairValues("litellm_input_tokens_metric", "model", dim.label) {
+				cellInputs[modelCell{pr.ValueA, pr.ValueB}] += pr.Value
 			}
-			cell := acc.apps[k.raw]
-			if cell == nil {
-				cell = &modelAppAcc{app: appKey(k.raw)}
-				acc.apps[k.raw] = cell
+			for _, pr := range m.LabelPairValues("litellm_output_tokens_metric", "model", dim.label) {
+				cellOutputs[modelCell{pr.ValueA, pr.ValueB}] += pr.Value
 			}
-			cell.tokens += tot
-			cell.tokensIn += inputs[k]
-			cell.tokensOut += outputs[k]
-			if hasSpend[k] {
-				setSum(&cell.spend, spends[k])
+			for _, pr := range m.LabelPairValues("litellm_spend_metric", "model", dim.label) {
+				k := modelCell{pr.ValueA, pr.ValueB}
+				cellSpends[k] += pr.Value
+				cellHasSpend[k] = true
 			}
+			mergeModelCells(models, cellTotals, cellInputs, cellOutputs, cellSpends, cellHasSpend, dim.topField)
 		}
 	}
 
@@ -346,12 +352,22 @@ func (p *Prober) ProbeAll(ctx context.Context, refs []PodRef) GatewayHealth {
 	sortModelStats(stats)
 	h.Models = stats
 
-	appStats := make([]AppStat, 0, len(apps))
-	for _, acc := range apps {
-		appStats = append(appStats, acc.stat())
+	// One top-level table per dimension, sorted by token volume.
+	for _, dim := range splitDims {
+		table := make([]SplitStat, 0, len(splits[dim.label]))
+		for _, acc := range splits[dim.label] {
+			table = append(table, acc.stat())
+		}
+		sortSplitStats(table)
+		switch dim.topField {
+		case "apps":
+			h.Apps = table
+		case "apiKeys":
+			h.APIKeys = table
+		case "teams":
+			h.Teams = table
+		}
 	}
-	sortAppStats(appStats)
-	h.Apps = appStats
 	return h
 }
 
@@ -371,13 +387,13 @@ func modelNames(m *llmhealth.Metrics) []string {
 	return out
 }
 
-// appRawValues is the union of raw `metadata_trace_name` label values across
-// all app-scoped metrics, in first-seen order.
-func appRawValues(m *llmhealth.Metrics) []string {
+// labelValuesAcross is the union of raw `labelKey` label values across all
+// split-dimension metrics, in first-seen order.
+func labelValuesAcross(m *llmhealth.Metrics, labelKey string) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, metric := range appMetrics {
-		for _, n := range m.LabelValues(metric, appLabel) {
+	for _, metric := range splitDimMetrics {
+		for _, n := range m.LabelValues(metric, labelKey) {
 			if !seen[n] {
 				seen[n] = true
 				out = append(out, n)
@@ -387,8 +403,9 @@ func appRawValues(m *llmhealth.Metrics) []string {
 	return out
 }
 
-type modelAppAcc struct {
-	app       string
+// modelSplitAcc is one (model, split-value) token/spend cell.
+type modelSplitAcc struct {
+	name      string
 	tokens    float64
 	tokensIn  float64
 	tokensOut float64
@@ -404,7 +421,17 @@ type modelAcc struct {
 	e2eP95   *float64
 	ttftP95  *float64
 	spend    *float64
-	apps     map[string]*modelAppAcc // keyed by raw metadata_trace_name
+	// splits is keyed by split-dimension top-field name ("apps"/"apiKeys"/"teams"),
+	// then by the raw label value.
+	splits map[string]map[string]*modelSplitAcc
+}
+
+// splitCells returns the model's cells for one dimension, or nil.
+func (a *modelAcc) splitCells(field string) map[string]*modelSplitAcc {
+	if a.splits == nil {
+		return nil
+	}
+	return a.splits[field]
 }
 
 func (a *modelAcc) addRate(dst **float64, r float64) {
@@ -429,18 +456,57 @@ func (a *modelAcc) stat() ModelStat {
 	stat.E2EP95Seconds = a.e2eP95
 	stat.TTFTP95Seconds = a.ttftP95
 	stat.Spend = a.spend
-	stat.Apps = modelAppStats(a.apps)
+	stat.Apps = modelSplitStats(a.splitCells("apps"))
+	stat.APIKeys = modelSplitStats(a.splitCells("apiKeys"))
+	stat.Teams = modelSplitStats(a.splitCells("teams"))
 	return stat
 }
 
-// modelAppStats renders a model's per-app cells, merging cells that normalize
-// to the same app key (e.g. raw "None" and empty both become "(unattributed)")
-// and sorting by total tokens (desc) then app name.
-func modelAppStats(apps map[string]*modelAppAcc) []ModelAppStat {
-	merged := map[string]*modelAppAcc{}
+// modelCell is a (model, raw split-value) key for the cross-tab aggregation.
+type modelCell struct{ model, raw string }
+
+// mergeModelCells folds one replica's (model, value) token/spend cells into the
+// per-model accumulators for the given dimension field ("apps"/"apiKeys"/"teams").
+func mergeModelCells(
+	models map[string]*modelAcc,
+	totals, inputs, outputs, spends map[modelCell]float64,
+	hasSpend map[modelCell]bool,
+	field string,
+) {
+	for k, tot := range totals {
+		acc := models[k.model]
+		if acc == nil {
+			continue // model has no latency/spend series; nothing to attach to
+		}
+		if acc.splits == nil {
+			acc.splits = map[string]map[string]*modelSplitAcc{}
+		}
+		if acc.splits[field] == nil {
+			acc.splits[field] = map[string]*modelSplitAcc{}
+		}
+		cells := acc.splits[field]
+		cell := cells[k.raw]
+		if cell == nil {
+			cell = &modelSplitAcc{name: splitKey(k.raw)}
+			cells[k.raw] = cell
+		}
+		cell.tokens += tot
+		cell.tokensIn += inputs[k]
+		cell.tokensOut += outputs[k]
+		if hasSpend[k] {
+			setSum(&cell.spend, spends[k])
+		}
+	}
+}
+
+// modelSplitStats renders a model's cells for one dimension, merging cells that
+// normalize to the same split key (e.g. raw "None" and empty both become
+// "(unattributed)") and sorting by total tokens (desc) then name.
+func modelSplitStats(cells map[string]*modelSplitAcc) []ModelSplitStat {
+	merged := map[string]*modelSplitAcc{}
 	var order []string
-	for _, c := range apps {
-		if existing, ok := merged[c.app]; ok {
+	for _, c := range cells {
+		if existing, ok := merged[c.name]; ok {
 			existing.tokens += c.tokens
 			existing.tokensIn += c.tokensIn
 			existing.tokensOut += c.tokensOut
@@ -449,14 +515,14 @@ func modelAppStats(apps map[string]*modelAppAcc) []ModelAppStat {
 			}
 			continue
 		}
-		merged[c.app] = &modelAppAcc{app: c.app, tokens: c.tokens, tokensIn: c.tokensIn, tokensOut: c.tokensOut, spend: c.spend}
-		order = append(order, c.app)
+		merged[c.name] = &modelSplitAcc{name: c.name, tokens: c.tokens, tokensIn: c.tokensIn, tokensOut: c.tokensOut, spend: c.spend}
+		order = append(order, c.name)
 	}
-	out := make([]ModelAppStat, 0, len(order))
-	for _, app := range order {
-		c := merged[app]
-		out = append(out, ModelAppStat{
-			App:          app,
+	out := make([]ModelSplitStat, 0, len(order))
+	for _, name := range order {
+		c := merged[name]
+		out = append(out, ModelSplitStat{
+			Name:         name,
 			TokensTotal:  int64(c.tokens),
 			TokensInput:  int64(c.tokensIn),
 			TokensOutput: int64(c.tokensOut),
@@ -467,23 +533,24 @@ func modelAppStats(apps map[string]*modelAppAcc) []ModelAppStat {
 		if out[i].TokensTotal != out[j].TokensTotal {
 			return out[i].TokensTotal > out[j].TokensTotal
 		}
-		return out[i].App < out[j].App
+		return out[i].Name < out[j].Name
 	})
 	return out
 }
 
-// appKey normalizes the raw metadata_trace_name label value into the display
-// key. LiteLLM emits the literal string "None" (and empty) for requests that
-// did not carry a trace name; both map to a single unattributed bucket.
-func appKey(raw string) string {
+// splitKey normalizes a raw split-dimension label value into its display key.
+// LiteLLM emits the literal string "None" (and empty) for unlabeled requests
+// (e.g. no metadata_trace_name / no team); all such values map to one
+// "(unattributed)" bucket.
+func splitKey(raw string) string {
 	if raw == "" || strings.EqualFold(raw, "none") {
-		return unattributedApp
+		return unattributedName
 	}
 	return raw
 }
 
-type appAcc struct {
-	app       string
+type splitAcc struct {
+	name      string
 	requests  float64
 	tokens    float64
 	tokensIn  float64
@@ -492,7 +559,7 @@ type appAcc struct {
 	spend     *float64
 }
 
-func (a *appAcc) addRate(dst **float64, r float64) {
+func (a *splitAcc) addRate(dst **float64, r float64) {
 	if *dst == nil {
 		v := r
 		*dst = &v
@@ -501,9 +568,9 @@ func (a *appAcc) addRate(dst **float64, r float64) {
 	}
 }
 
-func (a *appAcc) stat() AppStat {
-	return AppStat{
-		App:           a.app,
+func (a *splitAcc) stat() SplitStat {
+	return SplitStat{
+		Name:          a.name,
 		RequestsTotal: int64(a.requests),
 		TokensTotal:   int64(a.tokens),
 		TokensInput:   int64(a.tokensIn),
@@ -513,14 +580,14 @@ func (a *appAcc) stat() AppStat {
 	}
 }
 
-// sortAppStats orders apps by total tokens (desc), then name, so the largest
-// consumers lead the table regardless of map iteration order.
-func sortAppStats(s []AppStat) {
+// sortSplitStats orders a split table by total tokens (desc), then name, so the
+// largest consumers lead the table regardless of map iteration order.
+func sortSplitStats(s []SplitStat) {
 	sort.Slice(s, func(i, j int) bool {
 		if s[i].TokensTotal != s[j].TokensTotal {
 			return s[i].TokensTotal > s[j].TokensTotal
 		}
-		return s[i].App < s[j].App
+		return s[i].Name < s[j].Name
 	})
 }
 

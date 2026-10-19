@@ -378,26 +378,24 @@ Discovers in-cluster LiteLLM proxy pods (container image or command contains `li
         "ttftP95Seconds": 1.8,
         "spend": 1.55,
         "apps": [
-          {
-            "app": "my-service",
-            "tokensTotal": 90000,
-            "tokensInput": 80000,
-            "tokensOutput": 10000,
-            "spend": 1.40
-          }
+          { "name": "my-service", "tokensTotal": 90000, "tokensInput": 80000, "tokensOutput": 10000, "spend": 1.40 }
+        ],
+        "apiKeys": [
+          { "name": "Questions Service", "tokensTotal": 60000, "tokensInput": 55000, "tokensOutput": 5000, "spend": 0.90 }
+        ],
+        "teams": [
+          { "name": "Backend", "tokensTotal": 90000, "tokensInput": 80000, "tokensOutput": 10000, "spend": 1.55 }
         ]
       }
     ],
     "apps": [
-      {
-        "app": "my-service",
-        "requestsTotal": 120,
-        "tokensTotal": 90000,
-        "tokensInput": 80000,
-        "tokensOutput": 10000,
-        "tokensPerSec": 410.2,
-        "spend": 3.75
-      }
+      { "name": "my-service", "requestsTotal": 120, "tokensTotal": 90000, "tokensInput": 80000, "tokensOutput": 10000, "tokensPerSec": 410.2, "spend": 3.75 }
+    ],
+    "apiKeys": [
+      { "name": "Questions Service", "requestsTotal": 90, "tokensTotal": 60000, "tokensInput": 55000, "tokensOutput": 5000, "tokensPerSec": 280.0, "spend": 2.55 }
+    ],
+    "teams": [
+      { "name": "Backend", "requestsTotal": 120, "tokensTotal": 90000, "tokensInput": 80000, "tokensOutput": 10000, "tokensPerSec": 410.2, "spend": 3.75 }
     ]
   }
 }
@@ -407,8 +405,14 @@ Discovers in-cluster LiteLLM proxy pods (container image or command contains `li
 - `authError` (instead of metrics) when `/metrics` returns 401/403: set `LITELLM_METRICS_API_KEY` to the gateway's metrics admin key (LiteLLM has required auth on `/metrics` since v1.85.0).
 - `overheadP95Seconds` is the gateway's own processing time (routing/auth/billing) — high relative to `e2eP95Seconds` means the gateway, not the model, is the bottleneck.
 - `spend` is cumulative USD attributed by the gateway (resets when the gateway restarts).
-- `apps[]` is the per-calling-application breakdown, keyed by the `metadata_trace_name` metric label (set by clients via `metadata`). Requests without one are grouped under `(unattributed)`. Each entry reports cumulative `tokensTotal` / `tokensInput` / `tokensOutput` (prompt vs completion), `requestsTotal`, `tokensPerSec` (counter diff), and `spend`.
-- Each `models[]` entry also carries an `apps[]` — the per-calling-app breakdown for that model (cumulative `tokensTotal`/`tokensInput`/`tokensOutput` + `spend`), derived from the token/spend series that carry both `model` and `metadata_trace_name`. The frontend exposes it via the expandable row on each model.
+- **Split dimensions.** Usage can be grouped three ways, each exposed both as a top-level table and nested under every `models[]` entry:
+  - `apps[]` — per calling application (`metadata_trace_name`).
+  - `apiKeys[]` — per API-key alias (`api_key_alias`).
+  - `teams[]` — per team alias (`team_alias`).
+
+  Each entry is keyed by `name`; requests without a real label value are grouped under `(unattributed)`.
+  - Top-level entries report `requestsTotal`, `tokensTotal` / `tokensInput` / `tokensOutput` (prompt vs completion), `tokensPerSec` (counter diff), and `spend`.
+  - Nested (per-model) entries report `tokensTotal` / `tokensInput` / `tokensOutput` + `spend`. They are derived from the token/spend series that carry both `model` and the split label; the frontend exposes them via the expandable row on each model. (Per-model request counts are not shown because the request counter is labeled by `requested_model`, not base `model`.)
 
 ### Analyze Workloads
 
