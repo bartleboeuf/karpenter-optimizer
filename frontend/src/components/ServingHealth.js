@@ -650,12 +650,22 @@ function MetricExplainer() {
   );
 }
 
+// formatTokens renders a token count compactly (e.g. 12345 -> "12.3k") so the
+// per-app table stays readable when callers consume millions of tokens.
+function formatTokens(n) {
+  if (n == null) return '—';
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 2 : 1)}M`;
+  return `${(n / 1_000_000_000).toFixed(2)}B`;
+}
+
 // GatewayCard renders aggregated LiteLLM AI-gateway health: a row of stat
 // tiles (in-flight, admission queue, 503 rejections, error rate, E2E p95,
 // gateway overhead p95, requests/s) and a per-model breakdown table. When the
 // gateway's /metrics requires auth it shows an actionable 401 hint instead of
 // the numbers.
-function GatewayCard({ gateway }) {
+function GatewayCard({ gateway, view = 'apps', onViewChange }) {
   if (!gateway) return null;
 
   // Offline (no reachable replica / auth failure): a single slim banner.
@@ -689,6 +699,9 @@ function GatewayCard({ gateway }) {
     { label: 'Requests/s', tip: 'Gateway-wide request rate, derived from counter diffs between probes.', value: gateway.requestsPerSec != null ? gateway.requestsPerSec.toFixed(1) : 'n/a' },
   ];
 
+  const hasBreakdown =
+    (gateway.apps || []).length > 0 || (gateway.models || []).length > 0;
+
   return (
     <div className="mb-4 rounded-md border border-purple-200 bg-purple-50/40 p-3">
       <div className="mb-2 flex items-center gap-2">
@@ -713,39 +726,94 @@ function GatewayCard({ gateway }) {
         ))}
       </div>
 
-      {(gateway.models || []).length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-left text-muted-foreground border-b border-purple-200">
-                <th className="py-1 pr-2">Model</th>
-                <th className="py-1 pr-2 text-right">Req/s</th>
-                <th className="py-1 pr-2 text-right">Req total</th>
-                <th className="py-1 pr-2 text-right" title="Failed requests as a share of total">Err %</th>
-                <th className="py-1 pr-2 text-right" title="p95 end-to-end latency (model + gateway)">E2E p95</th>
-                <th className="py-1 pr-2 text-right" title="p95 time to first token">TTFT p95</th>
-                <th className="py-1 pr-2 text-right">Tokens/s</th>
-                <th className="py-1 text-right" title="Cumulative spend (USD)">Spend</th>
-              </tr>
-            </thead>
-            <tbody className="font-mono">
-              {gateway.models.map((m) => (
-                <tr key={m.model} className="border-b border-purple-100/60 last:border-0">
-                  <td className="py-1 pr-2 font-sans font-medium">{m.model}</td>
-                  <td className="py-1 pr-2 text-right">{m.requestsPerSec != null ? m.requestsPerSec.toFixed(2) : '—'}</td>
-                  <td className="py-1 pr-2 text-right">{m.requestsTotal}</td>
-                  <td className={cn('py-1 pr-2 text-right', (m.errorRatePct ?? 0) >= 5 && 'text-amber-600 font-semibold')}>
-                    {m.errorRatePct != null ? `${m.errorRatePct.toFixed(1)}%` : '—'}
-                  </td>
-                  <td className="py-1 pr-2 text-right">{m.e2eP95Seconds != null ? `${m.e2eP95Seconds.toFixed(2)}s` : '—'}</td>
-                  <td className="py-1 pr-2 text-right">{m.ttftP95Seconds != null ? `${m.ttftP95Seconds.toFixed(2)}s` : '—'}</td>
-                  <td className="py-1 pr-2 text-right">{m.tokensPerSec != null ? m.tokensPerSec.toFixed(1) : '—'}</td>
-                  <td className="py-1 text-right">{m.spend != null ? `$${m.spend.toFixed(2)}` : '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      {hasBreakdown && (
+        <>
+          <div className="mb-2 flex items-center gap-1">
+            {(['apps', 'models']).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => onViewChange?.(v)}
+                className={cn(
+                  'rounded px-2 py-0.5 text-[11px] font-medium capitalize transition-colors',
+                  view === v
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-white/60 text-muted-foreground hover:bg-white'
+                )}
+              >
+                {v}
+              </button>
+            ))}
+          </div>
+
+          {view === 'models' ? (
+            (gateway.models || []).length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-muted-foreground border-b border-purple-200">
+                      <th className="py-1 pr-2">Model</th>
+                      <th className="py-1 pr-2 text-right">Req/s</th>
+                      <th className="py-1 pr-2 text-right">Req total</th>
+                      <th className="py-1 pr-2 text-right" title="Failed requests as a share of total">Err %</th>
+                      <th className="py-1 pr-2 text-right" title="p95 end-to-end latency (model + gateway)">E2E p95</th>
+                      <th className="py-1 pr-2 text-right" title="p95 time to first token">TTFT p95</th>
+                      <th className="py-1 pr-2 text-right">Tokens/s</th>
+                      <th className="py-1 text-right" title="Cumulative spend (USD)">Spend</th>
+                    </tr>
+                  </thead>
+                  <tbody className="font-mono">
+                    {gateway.models.map((m) => (
+                      <tr key={m.model} className="border-b border-purple-100/60 last:border-0">
+                        <td className="py-1 pr-2 font-sans font-medium">{m.model}</td>
+                        <td className="py-1 pr-2 text-right">{m.requestsPerSec != null ? m.requestsPerSec.toFixed(2) : '—'}</td>
+                        <td className="py-1 pr-2 text-right">{m.requestsTotal}</td>
+                        <td className={cn('py-1 pr-2 text-right', (m.errorRatePct ?? 0) >= 5 && 'text-amber-600 font-semibold')}>
+                          {m.errorRatePct != null ? `${m.errorRatePct.toFixed(1)}%` : '—'}
+                        </td>
+                        <td className="py-1 pr-2 text-right">{m.e2eP95Seconds != null ? `${m.e2eP95Seconds.toFixed(2)}s` : '—'}</td>
+                        <td className="py-1 pr-2 text-right">{m.ttftP95Seconds != null ? `${m.ttftP95Seconds.toFixed(2)}s` : '—'}</td>
+                        <td className="py-1 pr-2 text-right">{m.tokensPerSec != null ? m.tokensPerSec.toFixed(1) : '—'}</td>
+                        <td className="py-1 text-right">{m.spend != null ? `$${m.spend.toFixed(2)}` : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
+          ) : (
+            (gateway.apps || []).length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-muted-foreground border-b border-purple-200">
+                      <th className="py-1 pr-2" title="Calling application (metadata_trace_name); requests without one are grouped as (unattributed)">App</th>
+                      <th className="py-1 pr-2 text-right">Req total</th>
+                      <th className="py-1 pr-2 text-right" title="Token throughput, derived from counter diffs">Tokens/s</th>
+                      <th className="py-1 pr-2 text-right" title="Cumulative total tokens">Tokens</th>
+                      <th className="py-1 pr-2 text-right" title="Cumulative input (prompt) tokens">In</th>
+                      <th className="py-1 pr-2 text-right" title="Cumulative output (completion) tokens">Out</th>
+                      <th className="py-1 text-right" title="Cumulative spend (USD)">Spend</th>
+                    </tr>
+                  </thead>
+                  <tbody className="font-mono">
+                    {gateway.apps.map((a) => (
+                      <tr key={a.app} className="border-b border-purple-100/60 last:border-0">
+                        <td className="py-1 pr-2 font-sans font-medium" title={a.app}>{a.app}</td>
+                        <td className="py-1 pr-2 text-right">{a.requestsTotal}</td>
+                        <td className="py-1 pr-2 text-right">{a.tokensPerSec != null ? a.tokensPerSec.toFixed(1) : '—'}</td>
+                        <td className="py-1 pr-2 text-right" title={String(a.tokensTotal ?? '')}>{formatTokens(a.tokensTotal)}</td>
+                        <td className="py-1 pr-2 text-right" title={String(a.tokensInput ?? '')}>{formatTokens(a.tokensInput)}</td>
+                        <td className="py-1 pr-2 text-right" title={String(a.tokensOutput ?? '')}>{formatTokens(a.tokensOutput)}</td>
+                        <td className="py-1 text-right">{a.spend != null ? `$${a.spend.toFixed(2)}` : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
+          )}
+        </>
       )}
     </div>
   );
@@ -760,6 +828,7 @@ function ServingHealth() {
   const [trendWindow, setTrendWindow] = useState('6h');
   const [servingHistory, setServingHistory] = useState({}); // key: ns/name -> {points, lastIssue}
   const [gateway, setGateway] = useState(null);
+  const [gatewayView, setGatewayView] = useState('apps'); // 'apps' | 'models'
 
   const fetchServing = useCallback(async () => {
     setLoading(true);
@@ -898,7 +967,7 @@ function ServingHealth() {
         ) : (
           <div className="space-y-4">
             <MetricExplainer />
-            <GatewayCard gateway={gateway} />
+            <GatewayCard gateway={gateway} view={gatewayView} onViewChange={setGatewayView} />
             {pods === null ? (
               <div className="flex flex-col items-center justify-center py-8">
                 <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mb-2" />
