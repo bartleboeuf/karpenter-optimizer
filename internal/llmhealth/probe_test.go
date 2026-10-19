@@ -290,3 +290,38 @@ func TestMetricsFacadeByLabel(t *testing.T) {
 		t.Errorf("unknown model p95: expected none, got %v", p95)
 	}
 }
+
+func TestLabelPairValues(t *testing.T) {
+	t.Parallel()
+
+	const fixture = `# TYPE litellm_total_tokens_metric counter
+litellm_total_tokens_metric_total{model="m1",metadata_trace_name="app-a"} 100
+litellm_total_tokens_metric_total{model="m1",metadata_trace_name="app-b"} 50
+litellm_total_tokens_metric_total{model="m1",metadata_trace_name="app-a"} 25
+litellm_total_tokens_metric_total{model="m2",metadata_trace_name="None"} 10
+litellm_total_tokens_metric_total{model="m2"} 999
+`
+	m := ParsePrometheus(fixture)
+	pairs := m.LabelPairValues("litellm_total_tokens_metric", "model", "metadata_trace_name")
+	if len(pairs) != 3 {
+		t.Fatalf("LabelPairValues = %d pairs, want 3: %+v", len(pairs), pairs)
+	}
+	got := map[[2]string]float64{}
+	for _, p := range pairs {
+		got[[2]string{p.ValueA, p.ValueB}] = p.Value
+	}
+	if got[[2]string{"m1", "app-a"}] != 125 {
+		t.Errorf("m1/app-a = %v, want 125 (100+25 summed)", got[[2]string{"m1", "app-a"}])
+	}
+	if got[[2]string{"m1", "app-b"}] != 50 {
+		t.Errorf("m1/app-b = %v, want 50", got[[2]string{"m1", "app-b"}])
+	}
+	// "None" is a real (non-empty) label value, so it is a valid pair.
+	if got[[2]string{"m2", "None"}] != 10 {
+		t.Errorf("m2/None = %v, want 10", got[[2]string{"m2", "None"}])
+	}
+	// Series missing metadata_trace_name must not contribute to any pair.
+	if _, ok := got[[2]string{"m2", ""}]; ok {
+		t.Errorf("series without app label leaked into a pair")
+	}
+}
