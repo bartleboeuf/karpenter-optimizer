@@ -2026,6 +2026,10 @@ func (r *Recommender) estimateCost(ctx context.Context, instanceTypes []string, 
 // must not be overridden, because that indicates the type is not priced there.
 var chinaOnDemandFallbackPricesCNY = map[string]map[string]float64{
 	"cn-north-1": {
+		"c5a.xlarge": 1.328, "c5a.2xlarge": 2.656, "c5a.4xlarge": 5.312, "c5a.8xlarge": 10.625,
+		"m5a.xlarge": 1.821, "m5a.2xlarge": 3.642, "m5a.4xlarge": 7.284, "m5a.8xlarge": 14.568,
+		"r5a.xlarge": 2.193, "r5a.2xlarge": 4.387, "r5a.4xlarge": 8.774, "r5a.8xlarge": 17.548,
+		"t3a.xlarge": 0.9464, "t3a.2xlarge": 1.8928,
 		"m6i.xlarge": 2.02642, "m6i.2xlarge": 4.05283, "m6i.4xlarge": 8.10566, "m6i.8xlarge": 16.21133,
 		"c6i.xlarge": 1.47874, "c6i.2xlarge": 2.95747, "c6i.4xlarge": 5.91494,
 		"r6i.xlarge": 2.43718, "r6i.2xlarge": 4.87435, "r6i.4xlarge": 9.74870,
@@ -2042,6 +2046,10 @@ var chinaOnDemandFallbackPricesCNY = map[string]map[string]float64{
 		"t4g.xlarge": 0.81060, "t4g.2xlarge": 1.62110,
 	},
 	"cn-northwest-1": {
+		"c5a.xlarge": 0.89, "c5a.2xlarge": 1.78, "c5a.4xlarge": 3.56, "c5a.8xlarge": 7.12,
+		"m5a.xlarge": 1.219, "m5a.2xlarge": 2.437, "m5a.4xlarge": 4.874, "m5a.8xlarge": 9.749,
+		"r5a.xlarge": 1.59, "r5a.2xlarge": 3.179, "r5a.4xlarge": 6.359, "r5a.8xlarge": 12.717,
+		"t3a.xlarge": 0.6901, "t3a.2xlarge": 1.3802,
 		"m6i.xlarge": 1.35551, "m6i.2xlarge": 2.71102, "m6i.4xlarge": 5.42203, "m6i.8xlarge": 10.84406,
 		"c6i.xlarge": 0.98582, "c6i.2xlarge": 1.97165, "c6i.4xlarge": 3.94330,
 		"r6i.xlarge": 1.76627, "r6i.2xlarge": 3.53254, "r6i.4xlarge": 7.06507,

@@ -594,6 +594,9 @@ func (r *Recommender) getCandidateInstanceTypes(architecture string, cpu, memory
 		if err == nil && len(availableTypes) > 0 {
 			// Filter by CPU/Memory ratio and requirements
 			candidates := r.filterInstanceTypesByRequirements(availableTypes, architecture, cpu, memory)
+			if isChinaRegion {
+				candidates = filterUnavailableChinaInstanceTypes(candidates)
+			}
 			if len(candidates) > 0 {
 				return candidates
 			}
@@ -603,13 +606,13 @@ func (r *Recommender) getCandidateInstanceTypes(architecture string, cpu, memory
 			// Only log if it's not a context timeout (which is expected on slow connections)
 			if !strings.Contains(err.Error(), "context deadline exceeded") && !strings.Contains(err.Error(), "timeout") {
 				if isChinaRegion {
-					log.Printf("Warning: Failed to get region-specific instance types from AWS API: %v. Using non-AMD hardcoded candidates for China.", err)
+					log.Printf("Warning: Failed to get region-specific instance types from AWS API: %v. Using filtered hardcoded candidates for China.", err)
 				} else {
 					log.Printf("Warning: Failed to get instance types from AWS API: %v. Using fallback list.", err)
 				}
 			} else {
 				if isChinaRegion {
-					log.Printf("Info: AWS Pricing API timed out. Using non-AMD hardcoded candidates for China.")
+					log.Printf("Info: AWS Pricing API timed out. Using filtered hardcoded candidates for China.")
 				} else {
 					log.Printf("Info: AWS Pricing API timed out. Using fallback instance types list. Subsequent requests will use cached data.")
 				}
@@ -619,23 +622,24 @@ func (r *Recommender) getCandidateInstanceTypes(architecture string, cpu, memory
 		}
 	}
 	if isChinaRegion {
-		// Keep AMD-vendor families out of the China hardcoded fallback. The
-		// pricing API remains the source of regional prices for candidate scoring.
-		return filterAMDInstanceTypes(r.getHardcodedCandidateInstanceTypes(architecture, cpu, memory))
+		return filterUnavailableChinaInstanceTypes(r.getHardcodedCandidateInstanceTypes(architecture, cpu, memory))
 	}
 
 	// Fallback to hardcoded list if AWS API is unavailable
 	return r.getHardcodedCandidateInstanceTypes(architecture, cpu, memory)
 }
 
-// filterAMDInstanceTypes removes AMD-vendor instance families (for example,
-// m6a, c6a, r6a, and t3a) from a candidate list. AWS uses the family suffix
-// "a" for these x86 families; this is distinct from the amd64 architecture.
-func filterAMDInstanceTypes(instanceTypes []string) []string {
+// filterUnavailableChinaInstanceTypes excludes families that the China EC2
+// DescribeInstanceTypeOfferings API reported unavailable in both cn-north-1
+// and cn-northwest-1 on 2026-10-19.
+func filterUnavailableChinaInstanceTypes(instanceTypes []string) []string {
+	unavailableFamilies := map[string]struct{}{
+		"m6a": {}, "c6a": {}, "r6a": {}, "x2gd": {}, "x8g": {},
+	}
 	filtered := make([]string, 0, len(instanceTypes))
 	for _, instanceType := range instanceTypes {
 		family, _, ok := strings.Cut(strings.ToLower(instanceType), ".")
-		if !ok || !strings.HasSuffix(family, "a") {
+		if _, unavailable := unavailableFamilies[family]; !ok || !unavailable {
 			filtered = append(filtered, instanceType)
 		}
 	}
@@ -731,16 +735,25 @@ func (r *Recommender) getHardcodedCandidateInstanceTypes(architecture string, cp
 		if memoryToCPURatio > 8 {
 			// Memory optimized
 			candidates = []string{"r6i.xlarge", "r6i.2xlarge", "r6i.4xlarge", "r6a.xlarge", "r6a.2xlarge", "r6a.4xlarge", "r8i.xlarge", "r8i.2xlarge"}
+			if isChinaRegion := r.config != nil && strings.HasPrefix(r.config.AWSRegion, "cn-"); isChinaRegion {
+				candidates = append(candidates, "r5a.xlarge", "r5a.2xlarge", "r5a.4xlarge", "r5a.8xlarge")
+			}
 		} else if cpu > 8 {
 			// CPU optimized
 			candidates = []string{"c6i.xlarge", "c6i.2xlarge", "c6i.4xlarge", "c6a.xlarge", "c6a.2xlarge", "c6a.4xlarge"}
+			if isChinaRegion := r.config != nil && strings.HasPrefix(r.config.AWSRegion, "cn-"); isChinaRegion {
+				candidates = append(candidates, "c5a.xlarge", "c5a.2xlarge", "c5a.4xlarge", "c5a.8xlarge")
+			}
 		} else {
 			// General purpose
 			candidates = []string{"m6i.xlarge", "m6i.2xlarge", "m6i.4xlarge", "m6i.8xlarge", "m6a.xlarge", "m6a.2xlarge", "m6a.4xlarge", "t3.xlarge", "t3.2xlarge"}
+			if isChinaRegion := r.config != nil && strings.HasPrefix(r.config.AWSRegion, "cn-"); isChinaRegion {
+				candidates = append(candidates, "m5a.xlarge", "m5a.2xlarge", "m5a.4xlarge", "m5a.8xlarge", "t3a.xlarge", "t3a.2xlarge")
+			}
 		}
 	}
 	if r.config != nil && strings.HasPrefix(r.config.AWSRegion, "cn-") {
-		candidates = filterAMDInstanceTypes(candidates)
+		candidates = filterUnavailableChinaInstanceTypes(candidates)
 	}
 
 	// Filter out invalid instance types and sort by cost efficiency

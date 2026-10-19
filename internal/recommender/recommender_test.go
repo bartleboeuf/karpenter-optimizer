@@ -16,6 +16,7 @@ type fakePricingProvider struct {
 	listErr       error
 	prices        map[string]float64
 	priceErrors   map[string]error
+	defaultPriceErr error
 }
 
 func (f *fakePricingProvider) GetAvailableEC2InstanceTypes(context.Context, string) ([]string, error) {
@@ -28,6 +29,9 @@ func (f *fakePricingProvider) GetProductPrice(_ context.Context, instanceType, _
 	}
 	if price, ok := f.prices[instanceType]; ok {
 		return price, nil
+	}
+	if f.defaultPriceErr != nil {
+		return 0, f.defaultPriceErr
 	}
 	return 0, errors.Join(awspricing.ErrNoPricingFound, errors.New("instance unavailable in region"))
 }
@@ -132,33 +136,53 @@ func TestEstimateInstanceCapacity(t *testing.T) {
 	}
 }
 
-func TestChinaHardcodedCandidatesExcludeAMDFamilies(t *testing.T) {
+func TestChinaHardcodedCandidatesExcludeUnavailableFamilies(t *testing.T) {
 	rec := &Recommender{
 		config:     &config.Config{AWSRegion: "cn-north-1"},
-		awsPricing: &fakePricingProvider{listErr: errors.New("pricing index unavailable")},
+		awsPricing: &fakePricingProvider{
+			listErr:         errors.New("pricing index unavailable"),
+			defaultPriceErr: errors.New("pricing API unavailable"),
+		},
 	}
 
 	got := rec.getCandidateInstanceTypes("amd64", 4, 16)
 	assert.NotEmpty(t, got, "China should still use the non-AMD hardcoded fallback")
 	for _, instanceType := range got {
 		family, _, _ := strings.Cut(instanceType, ".")
-		assert.False(t, strings.HasSuffix(strings.ToLower(family), "a"), "%s should not be an AMD family", instanceType)
+		assert.NotContains(t, []string{"m6a", "c6a", "r6a", "x2gd", "x8g"}, strings.ToLower(family), "%s has no China regional offering", instanceType)
 	}
 }
 
-func TestChinaHardcodedCandidateHelperExcludesAMDFamilies(t *testing.T) {
+func TestChinaHardcodedCandidateHelperExcludesUnavailableFamilies(t *testing.T) {
 	rec := &Recommender{config: &config.Config{AWSRegion: "cn-north-1"}}
 	got := rec.getHardcodedCandidateInstanceTypes("amd64", 4, 16)
 	assert.NotEmpty(t, got)
 	for _, instanceType := range got {
 		family, _, _ := strings.Cut(instanceType, ".")
-		assert.False(t, strings.HasSuffix(strings.ToLower(family), "a"), "%s should not be an AMD family", instanceType)
+		assert.NotContains(t, []string{"m6a", "c6a", "r6a", "x2gd", "x8g"}, strings.ToLower(family), "%s has no China regional offering", instanceType)
 	}
 }
 
-func TestFilterAMDInstanceTypes(t *testing.T) {
-	got := filterAMDInstanceTypes([]string{"m6a.xlarge", "c6a.2xlarge", "r6a.large", "m6i.xlarge", "m7g.large", "t3a.medium"})
-	assert.Equal(t, []string{"m6i.xlarge", "m7g.large"}, got)
+func TestFilterUnavailableChinaInstanceTypes(t *testing.T) {
+	input := []string{"m6a.xlarge", "c6a.2xlarge", "r6a.large", "c5a.xlarge", "m5a.xlarge", "r5a.xlarge", "t3a.xlarge", "x2gd.xlarge", "x8g.xlarge", "m6i.xlarge", "m7g.large", "c6gn.xlarge"}
+	got := filterUnavailableChinaInstanceTypes(input)
+	assert.Equal(t, []string{"c5a.xlarge", "m5a.xlarge", "r5a.xlarge", "t3a.xlarge", "m6i.xlarge", "m7g.large", "c6gn.xlarge"}, got)
+}
+
+func TestChinaDiscoveredCandidatesExcludeUnavailableFamilies(t *testing.T) {
+	rec := &Recommender{
+		config: &config.Config{AWSRegion: "cn-north-1"},
+		awsPricing: &fakePricingProvider{
+			instanceTypes: []string{"m6a.xlarge", "m6i.xlarge", "x2gd.xlarge", "c6gn.xlarge"},
+			prices:        map[string]float64{"m6a.xlarge": 1, "m6i.xlarge": 2, "x2gd.xlarge": 1, "c6gn.xlarge": 1},
+		},
+	}
+
+	got := rec.getCandidateInstanceTypes("amd64", 4, 16)
+	assert.NotContains(t, got, "m6a.xlarge")
+	assert.NotContains(t, got, "x2gd.xlarge")
+	assert.Contains(t, got, "m6i.xlarge")
+	assert.Contains(t, got, "c6gn.xlarge")
 }
 
 func TestChinaFallbackPriceIsRegionSpecific(t *testing.T) {
@@ -176,6 +200,30 @@ func TestChinaFallbackPriceIsRegionSpecific(t *testing.T) {
 			assert.Equal(t, "CNY", result.Currency)
 			assert.Equal(t, PricingSourceRegionalFallback, result.Source)
 			assert.Equal(t, PricingSourceRegionalFallback, sources["m6i.xlarge"])
+		})
+	}
+}
+
+func TestChinaAMDFallbackPricesAreRegionSpecific(t *testing.T) {
+	for _, tt := range []struct {
+		region       string
+		instanceType string
+		want         float64
+	}{
+		{region: "cn-north-1", instanceType: "c5a.xlarge", want: 1.328},
+		{region: "cn-north-1", instanceType: "m5a.xlarge", want: 1.821},
+		{region: "cn-north-1", instanceType: "r5a.xlarge", want: 2.193},
+		{region: "cn-north-1", instanceType: "t3a.xlarge", want: 0.9464},
+		{region: "cn-northwest-1", instanceType: "c5a.xlarge", want: 0.89},
+		{region: "cn-northwest-1", instanceType: "m5a.xlarge", want: 1.219},
+		{region: "cn-northwest-1", instanceType: "r5a.xlarge", want: 1.59},
+		{region: "cn-northwest-1", instanceType: "t3a.xlarge", want: 0.6901},
+	} {
+		t.Run(tt.region+"/"+tt.instanceType, func(t *testing.T) {
+			rec := &Recommender{config: &config.Config{AWSRegion: tt.region}}
+			result, _ := rec.EstimateCostWithSource(context.Background(), []string{tt.instanceType}, "on-demand", 1)
+			assert.Equal(t, tt.want, result.Cost)
+			assert.Equal(t, "CNY", result.Currency)
 		})
 	}
 }
@@ -211,10 +259,10 @@ func TestUSEast1FallbackDoesNotOverrideRegionalNoProduct(t *testing.T) {
 	rec := &Recommender{
 		config: &config.Config{AWSRegion: "us-east-1"},
 		awsPricing: &fakePricingProvider{
-			priceErrors: map[string]error{"m6i.xlarge": awspricing.ErrNoPricingFound},
+			priceErrors: map[string]error{"m5.large": awspricing.ErrNoPricingFound},
 		},
 	}
-	result, _ := rec.EstimateCostWithSource(context.Background(), []string{"m6i.xlarge"}, "on-demand", 1)
+	result, _ := rec.EstimateCostWithSource(context.Background(), []string{"m5.large"}, "on-demand", 1)
 	assert.Zero(t, result.Cost)
 	assert.Equal(t, PricingSourceUnknown, result.Source)
 }
