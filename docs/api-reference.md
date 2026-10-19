@@ -376,7 +376,27 @@ Discovers in-cluster LiteLLM proxy pods (container image or command contains `li
         "tokensPerSec": 420.5,
         "e2eP95Seconds": 8.6,
         "ttftP95Seconds": 1.8,
-        "spend": 1.55
+        "spend": 1.55,
+        "apps": [
+          {
+            "app": "my-service",
+            "tokensTotal": 90000,
+            "tokensInput": 80000,
+            "tokensOutput": 10000,
+            "spend": 1.40
+          }
+        ]
+      }
+    ],
+    "apps": [
+      {
+        "app": "my-service",
+        "requestsTotal": 120,
+        "tokensTotal": 90000,
+        "tokensInput": 80000,
+        "tokensOutput": 10000,
+        "tokensPerSec": 410.2,
+        "spend": 3.75
       }
     ]
   }
@@ -387,6 +407,8 @@ Discovers in-cluster LiteLLM proxy pods (container image or command contains `li
 - `authError` (instead of metrics) when `/metrics` returns 401/403: set `LITELLM_METRICS_API_KEY` to the gateway's metrics admin key (LiteLLM has required auth on `/metrics` since v1.85.0).
 - `overheadP95Seconds` is the gateway's own processing time (routing/auth/billing) — high relative to `e2eP95Seconds` means the gateway, not the model, is the bottleneck.
 - `spend` is cumulative USD attributed by the gateway (resets when the gateway restarts).
+- `apps[]` is the per-calling-application breakdown, keyed by the `metadata_trace_name` metric label (set by clients via `metadata`). Requests without one are grouped under `(unattributed)`. Each entry reports cumulative `tokensTotal` / `tokensInput` / `tokensOutput` (prompt vs completion), `requestsTotal`, `tokensPerSec` (counter diff), and `spend`.
+- Each `models[]` entry also carries an `apps[]` — the per-calling-app breakdown for that model (cumulative `tokensTotal`/`tokensInput`/`tokensOutput` + `spend`), derived from the token/spend series that carry both `model` and `metadata_trace_name`. The frontend exposes it via the expandable row on each model.
 
 ### Analyze Workloads
 

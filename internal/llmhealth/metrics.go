@@ -209,6 +209,47 @@ func (m *Metrics) LabelPairMap(keyA, keyB string) map[string]string {
 	return out
 }
 
+// LabelPairStat is one (valueA, valueB) label combination and the summed
+// value of a metric across all other label variants for that combination.
+type LabelPairStat struct {
+	ValueA string
+	ValueB string
+	Value  float64
+}
+
+// LabelPairValues returns the summed value of `name` for every distinct
+// (keyA, keyB) label combination present on its series, in first-seen order.
+// Series missing either label key are ignored. This supports the model×app
+// join, where LiteLLM's token/spend metrics carry both `model` and
+// `metadata_trace_name` on the same series.
+func (m *Metrics) LabelPairValues(name, keyA, keyB string) []LabelPairStat {
+	type pair struct{ a, b string }
+	sums := map[pair]float64{}
+	var order []pair
+	seen := map[pair]bool{}
+	for _, s := range m.samples {
+		if !matchesMetricBase(s.name, name) || isHistogramAgg(s.name) {
+			continue
+		}
+		ka, oka := s.labels[keyA]
+		kb, okb := s.labels[keyB]
+		if !oka || !okb || ka == "" || kb == "" {
+			continue
+		}
+		p := pair{ka, kb}
+		if !seen[p] {
+			seen[p] = true
+			order = append(order, p)
+		}
+		sums[p] += s.value
+	}
+	out := make([]LabelPairStat, 0, len(order))
+	for _, p := range order {
+		out = append(out, LabelPairStat{ValueA: p.a, ValueB: p.b, Value: sums[p]})
+	}
+	return out
+}
+
 func sumByLabel(vs []namedValue, labelKey, labelValue string) (float64, bool) {
 	var total float64
 	found := false

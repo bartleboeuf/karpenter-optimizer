@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,17 +24,43 @@ type PodRef struct {
 	Port int32
 }
 
+// ModelAppStat is one (model, calling-app) usage cell: how many tokens and how
+// much spend a given app consumed on a given model. Derived from the
+// token/spend counters, which carry both `model` and `metadata_trace_name` on
+// the same series (no bridging). Requests-without-a-trace are "(unattributed)".
+type ModelAppStat struct {
+	App          string   `json:"app"`
+	TokensTotal  int64    `json:"tokensTotal"`
+	TokensInput  int64    `json:"tokensInput"`
+	TokensOutput int64    `json:"tokensOutput"`
+	Spend        *float64 `json:"spend,omitempty"` // cumulative USD for this app on this model
+}
+
 // ModelStat is the per-model breakdown of gateway traffic.
 type ModelStat struct {
-	Model          string   `json:"model"`
-	RequestsTotal  int64    `json:"requestsTotal"`
-	FailedRequests int64    `json:"failedRequests"`
-	ErrorRatePct   *float64 `json:"errorRatePct,omitempty"` // failed/total, 0-100
-	RequestsPerSec *float64 `json:"requestsPerSec,omitempty"`
-	TokensPerSec   *float64 `json:"tokensPerSec,omitempty"`
-	E2EP95Seconds  *float64 `json:"e2eP95Seconds,omitempty"`  // p95 end-to-end latency (model + gateway)
-	TTFTP95Seconds *float64 `json:"ttftP95Seconds,omitempty"` // p95 time-to-first-token
-	Spend          *float64 `json:"spend,omitempty"`          // cumulative USD attributed to this model
+	Model          string         `json:"model"`
+	RequestsTotal  int64          `json:"requestsTotal"`
+	FailedRequests int64          `json:"failedRequests"`
+	ErrorRatePct   *float64       `json:"errorRatePct,omitempty"` // failed/total, 0-100
+	RequestsPerSec *float64       `json:"requestsPerSec,omitempty"`
+	TokensPerSec   *float64       `json:"tokensPerSec,omitempty"`
+	E2EP95Seconds  *float64       `json:"e2eP95Seconds,omitempty"`  // p95 end-to-end latency (model + gateway)
+	TTFTP95Seconds *float64       `json:"ttftP95Seconds,omitempty"` // p95 time-to-first-token
+	Spend          *float64       `json:"spend,omitempty"`          // cumulative USD attributed to this model
+	Apps           []ModelAppStat `json:"apps,omitempty"`           // per-calling-app breakdown for this model
+}
+
+// AppStat is the per-app breakdown of gateway traffic, keyed by the
+// `metadata_trace_name` label (the calling application, set by clients via
+// metadata; requests without one are grouped as "(unattributed)").
+type AppStat struct {
+	App           string   `json:"app"`
+	RequestsTotal int64    `json:"requestsTotal"`
+	TokensTotal   int64    `json:"tokensTotal"`
+	TokensInput   int64    `json:"tokensInput"`
+	TokensOutput  int64    `json:"tokensOutput"`
+	TokensPerSec  *float64 `json:"tokensPerSec,omitempty"`
+	Spend         *float64 `json:"spend,omitempty"` // cumulative USD attributed to this app
 }
 
 // GatewayHealth is the aggregated health of the LiteLLM gateway fleet.
@@ -60,6 +87,7 @@ type GatewayHealth struct {
 	Spend               *float64 `json:"spend,omitempty"`               // cumulative USD
 
 	Models []ModelStat `json:"models,omitempty"`
+	Apps   []AppStat   `json:"apps,omitempty"` // per calling-app (metadata_trace_name) usage
 }
 
 // Prober keeps the last sample of every counter it has seen (per replica,
@@ -101,12 +129,26 @@ var modelMetrics = []string{
 	"litellm_spend_metric",
 }
 
+// appMetrics are the LiteLLM metrics that carry a `metadata_trace_name` label.
+// We union their raw label values to discover every calling app; a given app
+// may appear on only a subset of these metrics.
+var appMetrics = []string{
+	"litellm_proxy_total_requests_metric",
+	"litellm_proxy_failed_requests_metric",
+	"litellm_total_tokens_metric",
+	"litellm_input_tokens_metric",
+	"litellm_output_tokens_metric",
+	"litellm_spend_metric",
+}
+
 // requestCounterLabel is the label LiteLLM uses on its request/failed counters.
 // Since v1.81.x it is `requested_model` (alias-prefixed); older releases used
 // `model`. The prober detects which one is present per replica.
 const (
 	reqLabelRequested = "requested_model"
 	reqLabelModel     = "model"
+	appLabel          = "metadata_trace_name"
+	unattributedApp   = "(unattributed)"
 )
 
 // ProbeAll scrapes every replica and aggregates the results.
@@ -119,6 +161,7 @@ func (p *Prober) ProbeAll(ctx context.Context, refs []PodRef) GatewayHealth {
 		hasFleetReq                bool
 	)
 	models := map[string]*modelAcc{}
+	apps := map[string]*appAcc{}
 
 	for _, ref := range refs {
 		replicaKey := fmt.Sprintf("%s:%d", ref.IP, ref.Port)
@@ -196,6 +239,83 @@ func (p *Prober) ProbeAll(ctx context.Context, refs []PodRef) GatewayHealth {
 				}
 			}
 		}
+
+		// Per-app breakdown: token/request/spend metrics are labeled directly
+		// with `metadata_trace_name`, so no bridging is needed. We iterate the
+		// raw label values (the real metric label is "None", not the display
+		// key) and bucket them by normalized app key.
+		for _, raw := range appRawValues(m) {
+			key := appKey(raw)
+			acc := apps[key]
+			if acc == nil {
+				acc = &appAcc{app: key}
+				apps[key] = acc
+			}
+			if v, ok := m.TotalByLabel("litellm_proxy_total_requests_metric", appLabel, raw); ok {
+				acc.requests += v
+			}
+			if v, ok := m.TotalByLabel("litellm_total_tokens_metric", appLabel, raw); ok {
+				acc.tokens += v
+				if r, ok := p.observeRate(replicaKey+"|aptok|"+raw, v); ok {
+					acc.addRate(&acc.tokRate, r)
+				}
+			}
+			if v, ok := m.TotalByLabel("litellm_input_tokens_metric", appLabel, raw); ok {
+				acc.tokensIn += v
+			}
+			if v, ok := m.TotalByLabel("litellm_output_tokens_metric", appLabel, raw); ok {
+				acc.tokensOut += v
+			}
+			if v, ok := m.TotalByLabel("litellm_spend_metric", appLabel, raw); ok {
+				setSum(&acc.spend, v)
+			}
+		}
+
+		// Model × app cross-tab: the token/spend counters carry both `model`
+		// and `metadata_trace_name` on the same series, so each (model, app)
+		// cell is summed directly — no bridging. Feeds the expandable per-model
+		// app detail in the UI.
+		type cellKey struct{ model, raw string }
+		totals := map[cellKey]float64{}
+		inputs := map[cellKey]float64{}
+		outputs := map[cellKey]float64{}
+		spends := map[cellKey]float64{}
+		hasSpend := map[cellKey]bool{}
+		for _, pr := range m.LabelPairValues("litellm_total_tokens_metric", "model", appLabel) {
+			k := cellKey{pr.ValueA, pr.ValueB}
+			totals[k] += pr.Value
+		}
+		for _, pr := range m.LabelPairValues("litellm_input_tokens_metric", "model", appLabel) {
+			inputs[cellKey{pr.ValueA, pr.ValueB}] += pr.Value
+		}
+		for _, pr := range m.LabelPairValues("litellm_output_tokens_metric", "model", appLabel) {
+			outputs[cellKey{pr.ValueA, pr.ValueB}] += pr.Value
+		}
+		for _, pr := range m.LabelPairValues("litellm_spend_metric", "model", appLabel) {
+			k := cellKey{pr.ValueA, pr.ValueB}
+			spends[k] += pr.Value
+			hasSpend[k] = true
+		}
+		for k, tot := range totals {
+			acc := models[k.model]
+			if acc == nil {
+				continue // model has no latency/spend series; nothing to attach to
+			}
+			if acc.apps == nil {
+				acc.apps = map[string]*modelAppAcc{}
+			}
+			cell := acc.apps[k.raw]
+			if cell == nil {
+				cell = &modelAppAcc{app: appKey(k.raw)}
+				acc.apps[k.raw] = cell
+			}
+			cell.tokens += tot
+			cell.tokensIn += inputs[k]
+			cell.tokensOut += outputs[k]
+			if hasSpend[k] {
+				setSum(&cell.spend, spends[k])
+			}
+		}
 	}
 
 	h.Online = okPods > 0
@@ -223,7 +343,15 @@ func (p *Prober) ProbeAll(ctx context.Context, refs []PodRef) GatewayHealth {
 	for _, acc := range models {
 		stats = append(stats, acc.stat())
 	}
+	sortModelStats(stats)
 	h.Models = stats
+
+	appStats := make([]AppStat, 0, len(apps))
+	for _, acc := range apps {
+		appStats = append(appStats, acc.stat())
+	}
+	sortAppStats(appStats)
+	h.Apps = appStats
 	return h
 }
 
@@ -243,6 +371,30 @@ func modelNames(m *llmhealth.Metrics) []string {
 	return out
 }
 
+// appRawValues is the union of raw `metadata_trace_name` label values across
+// all app-scoped metrics, in first-seen order.
+func appRawValues(m *llmhealth.Metrics) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, metric := range appMetrics {
+		for _, n := range m.LabelValues(metric, appLabel) {
+			if !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+type modelAppAcc struct {
+	app       string
+	tokens    float64
+	tokensIn  float64
+	tokensOut float64
+	spend     *float64
+}
+
 type modelAcc struct {
 	model    string
 	requests float64
@@ -252,6 +404,7 @@ type modelAcc struct {
 	e2eP95   *float64
 	ttftP95  *float64
 	spend    *float64
+	apps     map[string]*modelAppAcc // keyed by raw metadata_trace_name
 }
 
 func (a *modelAcc) addRate(dst **float64, r float64) {
@@ -276,7 +429,109 @@ func (a *modelAcc) stat() ModelStat {
 	stat.E2EP95Seconds = a.e2eP95
 	stat.TTFTP95Seconds = a.ttftP95
 	stat.Spend = a.spend
+	stat.Apps = modelAppStats(a.apps)
 	return stat
+}
+
+// modelAppStats renders a model's per-app cells, merging cells that normalize
+// to the same app key (e.g. raw "None" and empty both become "(unattributed)")
+// and sorting by total tokens (desc) then app name.
+func modelAppStats(apps map[string]*modelAppAcc) []ModelAppStat {
+	merged := map[string]*modelAppAcc{}
+	var order []string
+	for _, c := range apps {
+		if existing, ok := merged[c.app]; ok {
+			existing.tokens += c.tokens
+			existing.tokensIn += c.tokensIn
+			existing.tokensOut += c.tokensOut
+			if c.spend != nil {
+				setSum(&existing.spend, *c.spend)
+			}
+			continue
+		}
+		merged[c.app] = &modelAppAcc{app: c.app, tokens: c.tokens, tokensIn: c.tokensIn, tokensOut: c.tokensOut, spend: c.spend}
+		order = append(order, c.app)
+	}
+	out := make([]ModelAppStat, 0, len(order))
+	for _, app := range order {
+		c := merged[app]
+		out = append(out, ModelAppStat{
+			App:          app,
+			TokensTotal:  int64(c.tokens),
+			TokensInput:  int64(c.tokensIn),
+			TokensOutput: int64(c.tokensOut),
+			Spend:        c.spend,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TokensTotal != out[j].TokensTotal {
+			return out[i].TokensTotal > out[j].TokensTotal
+		}
+		return out[i].App < out[j].App
+	})
+	return out
+}
+
+// appKey normalizes the raw metadata_trace_name label value into the display
+// key. LiteLLM emits the literal string "None" (and empty) for requests that
+// did not carry a trace name; both map to a single unattributed bucket.
+func appKey(raw string) string {
+	if raw == "" || strings.EqualFold(raw, "none") {
+		return unattributedApp
+	}
+	return raw
+}
+
+type appAcc struct {
+	app       string
+	requests  float64
+	tokens    float64
+	tokensIn  float64
+	tokensOut float64
+	tokRate   *float64
+	spend     *float64
+}
+
+func (a *appAcc) addRate(dst **float64, r float64) {
+	if *dst == nil {
+		v := r
+		*dst = &v
+	} else {
+		**dst += r
+	}
+}
+
+func (a *appAcc) stat() AppStat {
+	return AppStat{
+		App:           a.app,
+		RequestsTotal: int64(a.requests),
+		TokensTotal:   int64(a.tokens),
+		TokensInput:   int64(a.tokensIn),
+		TokensOutput:  int64(a.tokensOut),
+		TokensPerSec:  a.tokRate,
+		Spend:         a.spend,
+	}
+}
+
+// sortAppStats orders apps by total tokens (desc), then name, so the largest
+// consumers lead the table regardless of map iteration order.
+func sortAppStats(s []AppStat) {
+	sort.Slice(s, func(i, j int) bool {
+		if s[i].TokensTotal != s[j].TokensTotal {
+			return s[i].TokensTotal > s[j].TokensTotal
+		}
+		return s[i].App < s[j].App
+	})
+}
+
+// sortModelStats orders models alphabetically. The per-model accumulators live
+// in a map, so without an explicit sort the row order would be random on every
+// scrape — the UI re-renders the table every poll and the rows would appear to
+// shuffle. A stable name order keeps the table readable.
+func sortModelStats(s []ModelStat) {
+	sort.Slice(s, func(i, j int) bool {
+		return s[i].Model < s[j].Model
+	})
 }
 
 // requestCounterName is the base name of LiteLLM's total-requests counter. The

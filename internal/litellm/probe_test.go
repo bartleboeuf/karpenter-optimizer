@@ -168,6 +168,10 @@ func TestProbeAllAggregatesReplicas(t *testing.T) {
 	if len(h.Models) != 2 {
 		t.Fatalf("Models = %d, want 2: %+v", len(h.Models), h.Models)
 	}
+	// Models must be deterministically ordered by name (map iteration is random).
+	if h.Models[0].Model != "gpt-4o" || h.Models[1].Model != "qwen3-30b" {
+		t.Errorf("Models order = %q, %q; want gpt-4o, qwen3-30b (by name)", h.Models[0].Model, h.Models[1].Model)
+	}
 	byModel := map[string]ModelStat{}
 	for _, ms := range h.Models {
 		byModel[ms.Model] = ms
@@ -203,6 +207,237 @@ func TestProbeAllAggregatesReplicas(t *testing.T) {
 		t.Fatal("qwen3-30b E2EP95Seconds = nil")
 	} else if *qwen.E2EP95Seconds <= 1.0 || *qwen.E2EP95Seconds >= 10.0 {
 		t.Errorf("qwen3-30b E2EP95Seconds = %v, want within (1.0, 10.0)", *qwen.E2EP95Seconds)
+	}
+}
+
+// replicaApps carries metadata_trace_name on the token/request/spend counters,
+// including a "None" (unattributed) caller.
+const replicaApps = `# TYPE litellm_proxy_total_requests_metric counter
+litellm_proxy_total_requests_metric_total{metadata_trace_name="app-a"} 120
+litellm_proxy_total_requests_metric_total{metadata_trace_name="app-b"} 40
+litellm_proxy_total_requests_metric_total{metadata_trace_name="None"} 10
+# TYPE litellm_total_tokens_metric counter
+litellm_total_tokens_metric_total{metadata_trace_name="app-a"} 90000
+litellm_total_tokens_metric_total{metadata_trace_name="app-b"} 30000
+litellm_total_tokens_metric_total{metadata_trace_name="None"} 5000
+# TYPE litellm_input_tokens_metric counter
+litellm_input_tokens_metric_total{metadata_trace_name="app-a"} 80000
+litellm_input_tokens_metric_total{metadata_trace_name="app-b"} 25000
+litellm_input_tokens_metric_total{metadata_trace_name="None"} 4000
+# TYPE litellm_output_tokens_metric counter
+litellm_output_tokens_metric_total{metadata_trace_name="app-a"} 10000
+litellm_output_tokens_metric_total{metadata_trace_name="app-b"} 5000
+litellm_output_tokens_metric_total{metadata_trace_name="None"} 1000
+# TYPE litellm_spend_metric counter
+litellm_spend_metric_total{metadata_trace_name="app-a"} 3.75
+litellm_spend_metric_total{metadata_trace_name="app-b"} 1.25
+litellm_spend_metric_total{metadata_trace_name="None"} 0
+`
+
+func TestProbeAllAppBreakdown(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, replicaApps)
+	}))
+	defer srv.Close()
+	ip, port := splitHostPort(t, srv.URL)
+
+	p := NewProber("")
+	h := p.ProbeAll(context.Background(), []PodRef{{IP: ip, Port: port}})
+
+	if !h.Online {
+		t.Fatalf("expected online gateway, got %+v", h)
+	}
+	if len(h.Apps) != 3 {
+		t.Fatalf("Apps = %d, want 3: %+v", len(h.Apps), h.Apps)
+	}
+	byApp := map[string]AppStat{}
+	for _, a := range h.Apps {
+		byApp[a.App] = a
+	}
+
+	a, ok := byApp["app-a"]
+	if !ok {
+		t.Fatal("missing app-a")
+	}
+	if a.RequestsTotal != 120 {
+		t.Errorf("app-a RequestsTotal = %d, want 120", a.RequestsTotal)
+	}
+	if a.TokensTotal != 90000 || a.TokensInput != 80000 || a.TokensOutput != 10000 {
+		t.Errorf("app-a tokens = %d/%d/%d, want 90000/80000/10000", a.TokensTotal, a.TokensInput, a.TokensOutput)
+	}
+	if a.Spend == nil || *a.Spend < 3.74 || *a.Spend > 3.76 {
+		t.Errorf("app-a Spend = %v, want ~3.75", a.Spend)
+	}
+	// First probe: no rate yet.
+	if a.TokensPerSec != nil {
+		t.Errorf("app-a TokensPerSec on first probe = %v, want nil", *a.TokensPerSec)
+	}
+
+	b, ok := byApp["app-b"]
+	if !ok {
+		t.Fatal("missing app-b")
+	}
+	if b.TokensTotal != 30000 || b.TokensInput != 25000 || b.TokensOutput != 5000 {
+		t.Errorf("app-b tokens = %d/%d/%d, want 30000/25000/5000", b.TokensTotal, b.TokensInput, b.TokensOutput)
+	}
+
+	// "None" is bucketed as (unattributed).
+	un, ok := byApp["(unattributed)"]
+	if !ok {
+		t.Fatal("missing (unattributed) app")
+	}
+	if un.TokensTotal != 5000 {
+		t.Errorf("(unattributed) TokensTotal = %d, want 5000", un.TokensTotal)
+	}
+	// 0.0 spend is still reported (not dropped).
+	if un.Spend == nil {
+		t.Errorf("(unattributed) Spend = nil, want 0")
+	} else if *un.Spend != 0 {
+		t.Errorf("(unattributed) Spend = %v, want 0", *un.Spend)
+	}
+
+	// Sorted by total tokens desc: app-a, app-b, (unattributed).
+	if h.Apps[0].App != "app-a" || h.Apps[1].App != "app-b" || h.Apps[2].App != "(unattributed)" {
+		t.Errorf("app order = %q, %q, %q; want app-a, app-b, (unattributed)", h.Apps[0].App, h.Apps[1].App, h.Apps[2].App)
+	}
+}
+
+func TestProbeAllAppRateFromCounterDiffs(t *testing.T) {
+	t.Parallel()
+
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, body)
+	}))
+	defer srv.Close()
+	ip, port := splitHostPort(t, srv.URL)
+
+	p := NewProber("")
+	body = replicaApps
+	p.ProbeAll(context.Background(), []PodRef{{IP: ip, Port: port}}) // baseline
+	time.Sleep(50 * time.Millisecond)
+
+	// Bump app-a's token counter by 2000; the diff over ~50ms yields a rate > 0.
+	body = strings.Replace(replicaApps,
+		`litellm_total_tokens_metric_total{metadata_trace_name="app-a"} 90000`,
+		`litellm_total_tokens_metric_total{metadata_trace_name="app-a"} 92000`, 1)
+	h := p.ProbeAll(context.Background(), []PodRef{{IP: ip, Port: port}})
+
+	a := findApp(h.Apps, "app-a")
+	if a == nil {
+		t.Fatal("missing app-a")
+	}
+	if a.TokensPerSec == nil {
+		t.Fatal("app-a TokensPerSec = nil, want a rate from the counter diff")
+	}
+	if *a.TokensPerSec <= 0 {
+		t.Errorf("app-a TokensPerSec = %v, want > 0", *a.TokensPerSec)
+	}
+}
+
+func findApp(apps []AppStat, name string) *AppStat {
+	for i := range apps {
+		if apps[i].App == name {
+			return &apps[i]
+		}
+	}
+	return nil
+}
+
+// replicaModelApp carries both `model` and `metadata_trace_name` on the token /
+// spend counters, so each (model, app) cell is derivable directly. A "None"
+// trace name is included to exercise the (unattributed) bucket.
+const replicaModelApp = `# TYPE litellm_proxy_total_requests_metric counter
+litellm_proxy_total_requests_metric_total{requested_model="pre/m1"} 100
+# TYPE litellm_total_tokens_metric counter
+litellm_total_tokens_metric_total{model="m1",requested_model="pre/m1",metadata_trace_name="app-a"} 1000
+litellm_total_tokens_metric_total{model="m1",requested_model="pre/m1",metadata_trace_name="app-b"} 300
+litellm_total_tokens_metric_total{model="m1",requested_model="pre/m1",metadata_trace_name="None"} 200
+# TYPE litellm_input_tokens_metric counter
+litellm_input_tokens_metric_total{model="m1",metadata_trace_name="app-a"} 900
+litellm_input_tokens_metric_total{model="m1",metadata_trace_name="app-b"} 250
+litellm_input_tokens_metric_total{model="m1",metadata_trace_name="None"} 150
+# TYPE litellm_output_tokens_metric counter
+litellm_output_tokens_metric_total{model="m1",metadata_trace_name="app-a"} 100
+litellm_output_tokens_metric_total{model="m1",metadata_trace_name="app-b"} 50
+litellm_output_tokens_metric_total{model="m1",metadata_trace_name="None"} 50
+# TYPE litellm_spend_metric counter
+litellm_spend_metric_total{model="m1",metadata_trace_name="app-a"} 1.20
+litellm_spend_metric_total{model="m1",metadata_trace_name="app-b"} 0.50
+litellm_spend_metric_total{model="m1",metadata_trace_name="None"} 0.30
+`
+
+func findModel(models []ModelStat, name string) *ModelStat {
+	for i := range models {
+		if models[i].Model == name {
+			return &models[i]
+		}
+	}
+	return nil
+}
+
+func findModelApp(model ModelStat, name string) *ModelAppStat {
+	for i := range model.Apps {
+		if model.Apps[i].App == name {
+			return &model.Apps[i]
+		}
+	}
+	return nil
+}
+
+func TestProbeAllModelAppBreakdown(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, replicaModelApp)
+	}))
+	defer srv.Close()
+	ip, port := splitHostPort(t, srv.URL)
+
+	p := NewProber("")
+	h := p.ProbeAll(context.Background(), []PodRef{{IP: ip, Port: port}})
+
+	m := findModel(h.Models, "m1")
+	if m == nil {
+		t.Fatalf("missing model m1: %+v", h.Models)
+	}
+	if len(m.Apps) != 3 {
+		t.Fatalf("m1.Apps = %d, want 3: %+v", len(m.Apps), m.Apps)
+	}
+
+	a := findModelApp(*m, "app-a")
+	if a == nil {
+		t.Fatal("missing app-a under m1")
+	}
+	if a.TokensTotal != 1000 || a.TokensInput != 900 || a.TokensOutput != 100 {
+		t.Errorf("m1/app-a tokens = %d/%d/%d, want 1000/900/100", a.TokensTotal, a.TokensInput, a.TokensOutput)
+	}
+	if a.Spend == nil || *a.Spend < 1.19 || *a.Spend > 1.21 {
+		t.Errorf("m1/app-a Spend = %v, want ~1.20", a.Spend)
+	}
+
+	b := findModelApp(*m, "app-b")
+	if b == nil {
+		t.Fatal("missing app-b under m1")
+	}
+	if b.TokensTotal != 300 || b.TokensInput != 250 || b.TokensOutput != 50 {
+		t.Errorf("m1/app-b tokens = %d/%d/%d, want 300/250/50", b.TokensTotal, b.TokensInput, b.TokensOutput)
+	}
+
+	un := findModelApp(*m, "(unattributed)")
+	if un == nil {
+		t.Fatal("missing (unattributed) under m1")
+	}
+	if un.TokensTotal != 200 {
+		t.Errorf("m1/(unattributed) TokensTotal = %d, want 200", un.TokensTotal)
+	}
+	if un.Spend == nil || *un.Spend < 0.29 || *un.Spend > 0.31 {
+		t.Errorf("m1/(unattributed) Spend = %v, want ~0.30", un.Spend)
+	}
+
+	// Sorted by total tokens desc: app-a, app-b, (unattributed).
+	if m.Apps[0].App != "app-a" || m.Apps[1].App != "app-b" || m.Apps[2].App != "(unattributed)" {
+		t.Errorf("m1 app order = %q, %q, %q; want app-a, app-b, (unattributed)", m.Apps[0].App, m.Apps[1].App, m.Apps[2].App)
 	}
 }
 
