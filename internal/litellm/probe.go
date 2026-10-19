@@ -343,6 +343,7 @@ func (p *Prober) ProbeAll(ctx context.Context, refs []PodRef) GatewayHealth {
 	for _, acc := range models {
 		stats = append(stats, acc.stat())
 	}
+	sortModelStats(stats)
 	h.Models = stats
 
 	appStats := make([]AppStat, 0, len(apps))
@@ -520,6 +521,16 @@ func sortAppStats(s []AppStat) {
 			return s[i].TokensTotal > s[j].TokensTotal
 		}
 		return s[i].App < s[j].App
+	})
+}
+
+// sortModelStats orders models alphabetically. The per-model accumulators live
+// in a map, so without an explicit sort the row order would be random on every
+// scrape — the UI re-renders the table every poll and the rows would appear to
+// shuffle. A stable name order keeps the table readable.
+func sortModelStats(s []ModelStat) {
+	sort.Slice(s, func(i, j int) bool {
+		return s[i].Model < s[j].Model
 	})
 }
 
