@@ -251,9 +251,9 @@ func TestProbeAllAppBreakdown(t *testing.T) {
 	if len(h.Apps) != 3 {
 		t.Fatalf("Apps = %d, want 3: %+v", len(h.Apps), h.Apps)
 	}
-	byApp := map[string]AppStat{}
+	byApp := map[string]SplitStat{}
 	for _, a := range h.Apps {
-		byApp[a.App] = a
+		byApp[a.Name] = a
 	}
 
 	a, ok := byApp["app-a"]
@@ -298,8 +298,8 @@ func TestProbeAllAppBreakdown(t *testing.T) {
 	}
 
 	// Sorted by total tokens desc: app-a, app-b, (unattributed).
-	if h.Apps[0].App != "app-a" || h.Apps[1].App != "app-b" || h.Apps[2].App != "(unattributed)" {
-		t.Errorf("app order = %q, %q, %q; want app-a, app-b, (unattributed)", h.Apps[0].App, h.Apps[1].App, h.Apps[2].App)
+	if h.Apps[0].Name != "app-a" || h.Apps[1].Name != "app-b" || h.Apps[2].Name != "(unattributed)" {
+		t.Errorf("app order = %q, %q, %q; want app-a, app-b, (unattributed)", h.Apps[0].Name, h.Apps[1].Name, h.Apps[2].Name)
 	}
 }
 
@@ -336,9 +336,9 @@ func TestProbeAllAppRateFromCounterDiffs(t *testing.T) {
 	}
 }
 
-func findApp(apps []AppStat, name string) *AppStat {
+func findApp(apps []SplitStat, name string) *SplitStat {
 	for i := range apps {
-		if apps[i].App == name {
+		if apps[i].Name == name {
 			return &apps[i]
 		}
 	}
@@ -377,9 +377,9 @@ func findModel(models []ModelStat, name string) *ModelStat {
 	return nil
 }
 
-func findModelApp(model ModelStat, name string) *ModelAppStat {
+func findModelApp(model ModelStat, name string) *ModelSplitStat {
 	for i := range model.Apps {
-		if model.Apps[i].App == name {
+		if model.Apps[i].Name == name {
 			return &model.Apps[i]
 		}
 	}
@@ -436,9 +436,124 @@ func TestProbeAllModelAppBreakdown(t *testing.T) {
 	}
 
 	// Sorted by total tokens desc: app-a, app-b, (unattributed).
-	if m.Apps[0].App != "app-a" || m.Apps[1].App != "app-b" || m.Apps[2].App != "(unattributed)" {
-		t.Errorf("m1 app order = %q, %q, %q; want app-a, app-b, (unattributed)", m.Apps[0].App, m.Apps[1].App, m.Apps[2].App)
+	if m.Apps[0].Name != "app-a" || m.Apps[1].Name != "app-b" || m.Apps[2].Name != "(unattributed)" {
+		t.Errorf("m1 app order = %q, %q, %q; want app-a, app-b, (unattributed)", m.Apps[0].Name, m.Apps[1].Name, m.Apps[2].Name)
 	}
+}
+
+// replicaSplitDims carries model, metadata_trace_name, api_key_alias and
+// team_alias all on the token/spend series, so every split dimension is
+// derivable without bridging.
+const replicaSplitDims = `# TYPE litellm_proxy_total_requests_metric counter
+litellm_proxy_total_requests_metric_total{api_key_alias="Key A",team_alias="Backend"} 30
+litellm_proxy_total_requests_metric_total{api_key_alias="Key B",team_alias="Frontend"} 20
+# TYPE litellm_total_tokens_metric counter
+litellm_total_tokens_metric_total{model="m1",metadata_trace_name="app-a",api_key_alias="Key A",team_alias="Backend"} 800
+litellm_total_tokens_metric_total{model="m1",metadata_trace_name="app-b",api_key_alias="Key B",team_alias="Frontend"} 200
+# TYPE litellm_input_tokens_metric counter
+litellm_input_tokens_metric_total{model="m1",api_key_alias="Key A",team_alias="Backend"} 700
+litellm_input_tokens_metric_total{model="m1",api_key_alias="Key B",team_alias="Frontend"} 150
+# TYPE litellm_output_tokens_metric counter
+litellm_output_tokens_metric_total{model="m1",api_key_alias="Key A",team_alias="Backend"} 100
+litellm_output_tokens_metric_total{model="m1",api_key_alias="Key B",team_alias="Frontend"} 50
+# TYPE litellm_spend_metric counter
+litellm_spend_metric_total{model="m1",api_key_alias="Key A",team_alias="Backend"} 1.0
+litellm_spend_metric_total{model="m1",api_key_alias="Key B",team_alias="Frontend"} 0.5
+`
+
+func TestProbeAllSplitDimensions(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, replicaSplitDims)
+	}))
+	defer srv.Close()
+	ip, port := splitHostPort(t, srv.URL)
+
+	p := NewProber("")
+	h := p.ProbeAll(context.Background(), []PodRef{{IP: ip, Port: port}})
+	if !h.Online {
+		t.Fatalf("expected online gateway, got %+v", h)
+	}
+
+	// Top-level: API-key dimension (Key A leads by tokens).
+	if len(h.APIKeys) != 2 {
+		t.Fatalf("APIKeys = %d, want 2: %+v", len(h.APIKeys), h.APIKeys)
+	}
+	ka := findSplit(h.APIKeys, "Key A")
+	if ka == nil {
+		t.Fatal("missing API key 'Key A'")
+	}
+	if ka.RequestsTotal != 30 || ka.TokensTotal != 800 || ka.TokensInput != 700 || ka.TokensOutput != 100 {
+		t.Errorf("Key A = %+v, want req=30 tok=800 in=700 out=100", ka)
+	}
+	if ka.Spend == nil || *ka.Spend < 0.99 || *ka.Spend > 1.01 {
+		t.Errorf("Key A spend = %v, want ~1.0", ka.Spend)
+	}
+	if h.APIKeys[0].Name != "Key A" || h.APIKeys[1].Name != "Key B" {
+		t.Errorf("APIKeys order = %q, %q; want Key A, Key B (by tokens)", h.APIKeys[0].Name, h.APIKeys[1].Name)
+	}
+
+	// Top-level: Team dimension (Backend leads by tokens).
+	if len(h.Teams) != 2 {
+		t.Fatalf("Teams = %d, want 2: %+v", len(h.Teams), h.Teams)
+	}
+	tb := findSplit(h.Teams, "Backend")
+	if tb == nil {
+		t.Fatal("missing team 'Backend'")
+	}
+	if tb.TokensTotal != 800 || tb.TokensInput != 700 || tb.TokensOutput != 100 {
+		t.Errorf("Backend tokens = %d/%d/%d, want 800/700/100", tb.TokensTotal, tb.TokensInput, tb.TokensOutput)
+	}
+
+	// Per-model: m1 must expose apiKeys[] and teams[] mirroring the top-level.
+	m := findModel(h.Models, "m1")
+	if m == nil {
+		t.Fatal("missing model m1")
+	}
+	mka := findModelSplit(*m, "apiKeys", "Key A")
+	if mka == nil {
+		t.Fatal("missing m1 API key 'Key A'")
+	}
+	if mka.TokensTotal != 800 || mka.TokensInput != 700 || mka.TokensOutput != 100 {
+		t.Errorf("m1/Key A tokens = %d/%d/%d, want 800/700/100", mka.TokensTotal, mka.TokensInput, mka.TokensOutput)
+	}
+	if mka.Spend == nil || *mka.Spend < 0.99 || *mka.Spend > 1.01 {
+		t.Errorf("m1/Key A spend = %v, want ~1.0", mka.Spend)
+	}
+	mteam := findModelSplit(*m, "teams", "Backend")
+	if mteam == nil {
+		t.Fatal("missing m1 team 'Backend'")
+	}
+	if mteam.TokensTotal != 800 {
+		t.Errorf("m1/Backend tokens = %d, want 800", mteam.TokensTotal)
+	}
+}
+
+func findSplit(splits []SplitStat, name string) *SplitStat {
+	for i := range splits {
+		if splits[i].Name == name {
+			return &splits[i]
+		}
+	}
+	return nil
+}
+
+func findModelSplit(model ModelStat, field, name string) *ModelSplitStat {
+	var rows []ModelSplitStat
+	switch field {
+	case "apiKeys":
+		rows = model.APIKeys
+	case "teams":
+		rows = model.Teams
+	case "apps":
+		rows = model.Apps
+	}
+	for i := range rows {
+		if rows[i].Name == name {
+			return &rows[i]
+		}
+	}
+	return nil
 }
 
 func TestProbeAllRateFromCounterDiffs(t *testing.T) {
