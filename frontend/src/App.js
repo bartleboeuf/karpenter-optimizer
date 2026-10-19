@@ -315,9 +315,6 @@ function App() {
                         <p className="text-xs text-muted-foreground mt-2">
                           Region: {config.aws?.region || 'Not configured'} · Currency: {config.aws?.currency || 'USD'}
                         </p>
-                        <p className="text-xs text-muted-foreground mt-2">
-                          Region: {config.aws?.region || 'Not configured'} · Currency: {config.aws?.currency || 'USD'}
-                        </p>
                       </CardContent>
                     </Card>
 
