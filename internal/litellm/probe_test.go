@@ -168,6 +168,10 @@ func TestProbeAllAggregatesReplicas(t *testing.T) {
 	if len(h.Models) != 2 {
 		t.Fatalf("Models = %d, want 2: %+v", len(h.Models), h.Models)
 	}
+	// Models must be deterministically ordered by name (map iteration is random).
+	if h.Models[0].Model != "gpt-4o" || h.Models[1].Model != "qwen3-30b" {
+		t.Errorf("Models order = %q, %q; want gpt-4o, qwen3-30b (by name)", h.Models[0].Model, h.Models[1].Model)
+	}
 	byModel := map[string]ModelStat{}
 	for _, ms := range h.Models {
 		byModel[ms.Model] = ms
