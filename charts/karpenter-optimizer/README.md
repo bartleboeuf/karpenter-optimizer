@@ -158,6 +158,15 @@ The following table lists the configurable parameters and their default values:
 | `config.ollama.url` | Ollama URL (legacy) | `""` |
 | `config.ollama.model` | Ollama model (legacy) | `granite4:latest` |
 | `config.aws.region` | AWS region | `us-east-1` |
+| `database.enabled` | Provision a CNPG `PostgresCluster` for durable LiteLLM gateway cost history (requires the CNPG operator installed). `false` = in-memory history that resets on restart | `false` |
+| `database.cluster.name` | CNPG cluster / service name (and credentials-secret name base) | `karpenter-optimizer-history` |
+| `database.cluster.postgresImage.repository` | Postgres image | `ghcr.io/cloudnative-pg/postgresql` |
+| `database.cluster.postgresImage.tag` | Postgres image tag | `16.4` |
+| `database.cluster.database` | Database name | `karpenter_optimizer` |
+| `database.cluster.user` | Owner user | `gateway_history` |
+| `database.cluster.retentionHours` | Cost-history retention in hours (`GATEWAY_HISTORY_RETENTION_HOURS`) | `720` |
+| `database.cluster.storage.size` | Data volume size | `10Gi` |
+| `database.cluster.storage.storageClass` | Storage class (empty = cluster default) | `""` |
 | `resources.limits.cpu` | CPU limit | `500m` |
 | `resources.limits.memory` | Memory limit | `512Mi` |
 | `resources.requests.cpu` | CPU request | `100m` |

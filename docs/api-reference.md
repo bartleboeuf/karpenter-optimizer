@@ -414,6 +414,48 @@ Discovers in-cluster LiteLLM proxy pods (container image or command contains `li
   - Top-level entries report `requestsTotal`, `tokensTotal` / `tokensInput` / `tokensOutput` (prompt vs completion), `tokensPerSec` (counter diff), and `spend`.
   - Nested (per-model) entries report `tokensTotal` / `tokensInput` / `tokensOutput` + `spend`. They are derived from the token/spend series that carry both `model` and the split label; the frontend exposes them via the expandable row on each model. (Per-model request counts are not shown because the request counter is labeled by `requested_model`, not base `model`.)
 
+### Gateway Cost History
+
+```http
+GET /api/v1/serving/gateway/history?split=app&window=14d
+```
+
+Per-day LiteLLM gateway cost and token usage, grouped by a split dimension. A
+background sampler (same 60s interval as the cluster/serving trend samplers)
+diffs the gateway's cumulative spend/token counters each tick and folds the
+deltas into per-day totals, so a day's cost is the sum of the intervals sampled
+within it.
+
+- `split` — `total` | `app` | `apikey` | `team` (default `app`).
+- `window` — duration or day count, default `14d`, max `90d` (e.g. `7d`, `30d`).
+- Backed by an **in-memory store** by default (resets on process restart); set
+  `GATEWAY_HISTORY_DSN` (or the `GATEWAY_HISTORY_DB_*` parts) to use a durable
+  Postgres/CNPG store that survives restarts. The Helm chart provisions a small
+  CNPG `PostgresCluster` when `database.enabled: true`.
+- Counter resets (a gateway replica restarts) clamp the interval diff to 0, so
+  a restarted replica under-counts that interval rather than reporting a spike.
+
+**Response**:
+```json
+{
+  "window": "336h0m0s",
+  "split": "app",
+  "store": "postgres",
+  "days": [
+    { "day": "2026-10-18", "dayTs": "2026-10-18T00:00:00Z", "value": "my-service", "spend": 3.75, "tokens": 90000 },
+    { "day": "2026-10-18", "dayTs": "2026-10-18T00:00:00Z", "value": "other-app", "spend": 1.20, "tokens": 30000 },
+    { "day": "2026-10-19", "dayTs": "2026-10-19T00:00:00Z", "value": "my-service", "spend": 2.10, "tokens": 54000 }
+  ]
+}
+```
+
+- `days[]` is ordered by day ascending, then value; `value` is the split
+  dimension name (empty for `split=total`).
+- `store` is `postgres` or `memory` — the frontend hints accordingly when empty.
+- The Serving tab renders this as a **Cost & tokens by day** area chart in the
+  Gateway card, following the active Split-by control, with a
+  spend/tokens toggle, a fleet-total overlay, and a 7/14/30-day window selector.
+
 ### Analyze Workloads
 
 ```http

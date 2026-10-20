@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -20,6 +21,11 @@ type Config struct {
 	// LiteLLM gateway metrics auth: Bearer key for the proxy's /metrics
 	// endpoint (required by LiteLLM >= v1.85.0). Empty = unauthenticated.
 	LiteLLMMetricsAPIKey string
+	// LiteLLM gateway cost history: Postgres DSN (e.g. a CNPG cluster) that
+	// durably stores per-day spend/token totals. Empty = in-memory store that
+	// resets on process restart. If empty, it is composed from
+	// GATEWAY_HISTORY_DB_{HOST,PORT,USER,DATABASE} + GATEWAY_HISTORY_DB_PASSWORD.
+	GatewayHistoryDSN string
 	// Legacy Ollama configuration (for backward compatibility)
 	OllamaURL   string
 	OllamaModel string
@@ -95,6 +101,7 @@ func Load() *Config {
 		LLMAWSRegion:         getEnv("LLM_AWS_REGION", ""),
 		LLMMaxTokens:         getEnvInt("LLM_MAX_TOKENS", 0),
 		LiteLLMMetricsAPIKey: getEnv("LITELLM_METRICS_API_KEY", ""),
+		GatewayHistoryDSN:    resolveGatewayHistoryDSN(),
 		OllamaURL:            ollamaURL, // Keep for backward compatibility
 		OllamaModel:          ollamaModel,
 		AWSRegion:            getEnv("AWS_REGION", "eu-west-1"),
@@ -112,7 +119,6 @@ func getEnv(key, defaultValue string) string {
 	}
 	return defaultValue
 }
-
 func getEnvInt(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
 		if parsed, err := strconv.Atoi(value); err == nil {
@@ -127,4 +133,48 @@ func getEnvBool(key string, defaultValue bool) bool {
 		return value == "true" || value == "1" || value == "yes" || value == "on"
 	}
 	return defaultValue
+}
+
+// resolveGatewayHistoryDSN returns the Postgres DSN for durable gateway cost
+// history. An explicit GATEWAY_HISTORY_DSN wins; otherwise the DSN is composed
+// from GATEWAY_HISTORY_DB_{HOST,PORT,USER,DATABASE} plus
+// GATEWAY_HISTORY_DB_PASSWORD (the password is passed via a CNPG Secret in the
+// chart). Returns "" when no host is set, which selects the in-memory store.
+func resolveGatewayHistoryDSN() string {
+	if dsn := os.Getenv("GATEWAY_HISTORY_DSN"); dsn != "" {
+		return dsn
+	}
+	host := os.Getenv("GATEWAY_HISTORY_DB_HOST")
+	if host == "" {
+		return ""
+	}
+	port := getEnv("GATEWAY_HISTORY_DB_PORT", "5432")
+	u := &url.URL{
+		Scheme: "postgres",
+		Host:   netHost(host, port),
+	}
+	if user := os.Getenv("GATEWAY_HISTORY_DB_USER"); user != "" {
+		password := os.Getenv("GATEWAY_HISTORY_DB_PASSWORD")
+		if password != "" {
+			u.User = url.UserPassword(user, password)
+		} else {
+			u.User = url.User(user)
+		}
+	}
+	db := os.Getenv("GATEWAY_HISTORY_DB_NAME")
+	if db == "" {
+		db = os.Getenv("GATEWAY_HISTORY_DB_DATABASE")
+	}
+	if db != "" {
+		u.Path = "/" + db
+	}
+	return u.String()
+}
+
+// netHost joins host and port, leaving a bare host when port is empty.
+func netHost(host, port string) string {
+	if port == "" {
+		return host
+	}
+	return host + ":" + port
 }

@@ -10,7 +10,7 @@ import (
 func TestLoad(t *testing.T) {
 	t.Run("loads default values", func(t *testing.T) {
 		cfg := Load()
-		
+
 		assert.NotNil(t, cfg)
 		assert.Equal(t, "8080", cfg.APIPort)
 		assert.Equal(t, "http://localhost:11434", cfg.OllamaURL)
@@ -26,7 +26,7 @@ func TestLoad(t *testing.T) {
 		_ = os.Setenv("KUBECONFIG", "/test/kubeconfig")
 		_ = os.Setenv("KUBE_CONTEXT", "test-context")
 		_ = os.Setenv("DEBUG", "true")
-		
+
 		// Clean up after test
 		defer func() {
 			_ = os.Unsetenv("PORT")
@@ -38,7 +38,7 @@ func TestLoad(t *testing.T) {
 		}()
 
 		cfg := Load()
-		
+
 		assert.Equal(t, "9090", cfg.APIPort)
 		assert.Equal(t, "http://test:11434", cfg.OllamaURL)
 		assert.Equal(t, "test-model", cfg.OllamaModel)
@@ -50,14 +50,14 @@ func TestLoad(t *testing.T) {
 	t.Run("handles empty environment variables", func(t *testing.T) {
 		_ = os.Setenv("PORT", "")
 		_ = os.Setenv("OLLAMA_URL", "")
-		
+
 		defer func() {
 			_ = os.Unsetenv("PORT")
 			_ = os.Unsetenv("OLLAMA_URL")
 		}()
 
 		cfg := Load()
-		
+
 		// Should use defaults when env vars are empty
 		assert.Equal(t, "8080", cfg.APIPort)
 		assert.Equal(t, "http://localhost:11434", cfg.OllamaURL)
@@ -75,7 +75,7 @@ func TestGetEnv(t *testing.T) {
 
 	t.Run("returns default when env var not set", func(t *testing.T) {
 		_ = os.Unsetenv("NONEXISTENT_VAR")
-		
+
 		result := getEnv("NONEXISTENT_VAR", "default-value")
 		assert.Equal(t, "default-value", result)
 	})
@@ -89,3 +89,48 @@ func TestGetEnv(t *testing.T) {
 	})
 }
 
+// TestResolveGatewayHistoryDSN covers the explicit-DSN short-circuit and the
+// composition of a DSN from the individual GATEWAY_HISTORY_DB_* parts.
+func TestResolveGatewayHistoryDSN(t *testing.T) {
+	t.Run("empty when no host", func(t *testing.T) {
+		_ = os.Unsetenv("GATEWAY_HISTORY_DSN")
+		_ = os.Unsetenv("GATEWAY_HISTORY_DB_HOST")
+		assert.Empty(t, resolveGatewayHistoryDSN())
+	})
+
+	t.Run("explicit DSN wins", func(t *testing.T) {
+		_ = os.Setenv("GATEWAY_HISTORY_DSN", "postgres://u:p@h:5432/db")
+		_ = os.Setenv("GATEWAY_HISTORY_DB_HOST", "other")
+		defer func() {
+			_ = os.Unsetenv("GATEWAY_HISTORY_DSN")
+			_ = os.Unsetenv("GATEWAY_HISTORY_DB_HOST")
+		}()
+		assert.Equal(t, "postgres://u:p@h:5432/db", resolveGatewayHistoryDSN())
+	})
+
+	t.Run("composed from parts with password", func(t *testing.T) {
+		_ = os.Unsetenv("GATEWAY_HISTORY_DSN")
+		_ = os.Setenv("GATEWAY_HISTORY_DB_HOST", "cnpg.cluster")
+		_ = os.Setenv("GATEWAY_HISTORY_DB_PORT", "5433")
+		_ = os.Setenv("GATEWAY_HISTORY_DB_USER", "gateway_history")
+		_ = os.Setenv("GATEWAY_HISTORY_DB_PASSWORD", "s3cret")
+		_ = os.Setenv("GATEWAY_HISTORY_DB_NAME", "karpenter_optimizer")
+		defer func() {
+			_ = os.Unsetenv("GATEWAY_HISTORY_DB_HOST")
+			_ = os.Unsetenv("GATEWAY_HISTORY_DB_PORT")
+			_ = os.Unsetenv("GATEWAY_HISTORY_DB_USER")
+			_ = os.Unsetenv("GATEWAY_HISTORY_DB_PASSWORD")
+			_ = os.Unsetenv("GATEWAY_HISTORY_DB_NAME")
+		}()
+		got := resolveGatewayHistoryDSN()
+		assert.Equal(t, "postgres://gateway_history:s3cret@cnpg.cluster:5433/karpenter_optimizer", got)
+	})
+
+	t.Run("no user yields no credentials", func(t *testing.T) {
+		_ = os.Unsetenv("GATEWAY_HISTORY_DSN")
+		_ = os.Unsetenv("GATEWAY_HISTORY_DB_USER")
+		_ = os.Setenv("GATEWAY_HISTORY_DB_HOST", "db.local")
+		defer func() { _ = os.Unsetenv("GATEWAY_HISTORY_DB_HOST") }()
+		assert.Equal(t, "postgres://db.local:5432", resolveGatewayHistoryDSN())
+	})
+}

@@ -162,6 +162,39 @@ config:
   port: 8080
   logLevel: "info"
 
+# LiteLLM gateway cost history (per-day spend/token by app/API key/team).
+# When database.enabled is true the chart provisions a small CNPG
+# (CloudNativePG) PostgresCluster and points the app at it, so cost history is
+# durable across optimizer restarts/redeploys. When disabled (default), the app
+# keeps an in-memory history that resets on restart.
+#
+# REQUIRES: the CNPG operator to be installed in the cluster (separately) when
+# enabled. The operator creates the <cluster>-<database>-credentials secret
+# that the deployment references.
+database:
+  enabled: false
+  cluster:
+    # The CNPG PostgresCluster name (also the in-cluster service DNS + the
+    # base name of the credentials secret).
+    name: karpenter-optimizer-history
+    postgresImage:
+      repository: ghcr.io/cloudnative-pg/postgresql
+      tag: "16.4"
+    database: karpenter_optimizer
+    user: gateway_history
+    # Retention for per-day cost history (hours). The app purges rows older
+    # than this. 720 = 30 days.
+    retentionHours: 720
+    storage:
+      size: 10Gi
+      storageClass: ""  # e.g. gp3 / standard; empty = cluster default
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
+
 # Environment variables
 env: []
   # - name: CUSTOM_VAR
