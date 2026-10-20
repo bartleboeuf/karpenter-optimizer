@@ -22,7 +22,7 @@ This document provides context and guidelines for AI coding assistants working o
   - `internal/recommender/recommender.go` - Legacy recommendation logic (cluster-summary based)
   - `internal/recommender/node_pool_recommender.go` - **PRIMARY** recommendation engine (NodePool-based)
   - `internal/kubernetes/client.go` - Kubernetes API client (nodes, pods, NodePools)
- - `internal/awspricing/client.go` - AWS Pricing API client for instance pricing
+ - `internal/awspricing/client.go` - AWS Pricing API client for region-aware instance pricing, currency selection, regional endpoints, and transient endpoint failover
  - `internal/power/power.go` - Static EC2-family wattage table; `Estimate(instanceTypes)` returns fleet watts + coverage
  - `internal/ollama/client.go` - Ollama LLM client for AI explanations
  - `internal/llmhealth/probe.go` - Probes vLLM/sglang pods (`PodHealth`); rate diffs (tok/s, req/s) come from successive counter samples. `Metrics` (probe.go + `metrics.go`) is the exported Prometheus text-exposition parser (gauge/counter/histogram query helpers, per-label-variant histograms) shared by the serving and LiteLLM probers
@@ -53,6 +53,7 @@ type NodePoolCapacityRecommendation struct {
     CurrentMemoryUsed        float64  `json:"currentMemoryUsed"`
     CurrentMemoryCapacity    float64  `json:"currentMemoryCapacity"`
     CurrentCost              float64  `json:"currentCost"`
+    Currency                 string   `json:"currency"` // ISO currency code for cost fields (USD or CNY)
     RecommendedNodes         int      `json:"recommendedNodes"`
     RecommendedInstanceTypes []string `json:"recommendedInstanceTypes"`
     RecommendedTotalCPU      float64  `json:"recommendedTotalCPU"`
@@ -94,6 +95,18 @@ type NodeInfo struct {
 - NodePool-CRD endpoints (`/recommendations`, `/nodepools`, `/nodepools/recommendations`, `/nodepools/{name}`, `/recommendations/cluster-summary` + SSE, `/agent/cost-optimization`) return **503** `{"code":"karpenter_not_found"}` when Karpenter is absent (the SSE variant emits an `error` event).
 - Cluster cost is reported as `costUnknown: true` (frontend shows "n/a") when no node has an `instance-type` label.
 
+### AWS Regional Pricing and Currency
+- `internal/awspricing/client.go` is the source of truth for `PricingCurrencyForRegion`, AWS Pricing API region/location mappings, regional endpoints, and retry classification.
+- Commercial AWS regions return USD pricing. `cn-north-1` and `cn-northwest-1` use the China Pricing API endpoint (`cn-northwest-1`) and their respective product locations (Beijing and Ningxia), and return CNY.
+- `/api/v1/config` exposes `aws.region` and `aws.currency`. Cost and recommendation payloads should carry currency metadata where they expose monetary values; do not assume response amounts are always USD.
+- The frontend currency helpers live in `frontend/src/lib/currency.js`. `App.js` provides the configured region context; use `useCurrencyFormatter()` (or `formatCurrency(value, region)`) for cost values to render `CN¥` in China and `$` elsewhere.
+- Commercial Pricing API calls prefer `us-east-1` for Americas, `eu-central-1` for Europe/Middle East/Africa, and `ap-south-1` for Asia-Pacific. Retry through the other commercial endpoints only for transient network, timeout, throttling, or server failures; do not fail over authorization/invalid-request errors. Preserve the configured workload-region product-location filter regardless of endpoint. China requests must not fail over to the commercial partition.
+- Pricing-index hosts are partition-aware, and discovered products must match the configured AWS region's Pricing API location; do not use cross-region index entries as instance candidates.
+- On-demand live AWS Pricing API results are preferred. Spot cost is an estimate using `awspricing.SpotDiscountFactor` (25% of on-demand), not a live Spot quote.
+- Hardcoded on-demand snapshots and family estimates are restricted to `us-east-1`; never treat a USD estimate as a price for another commercial region or China. The dated China CNY snapshot is only for supported types when live pricing is unavailable due to transient/API access failures. Do not use it when the API explicitly reports `awspricing.ErrNoPricingFound` for the target region.
+- If an instance in a mixed-type cost calculation cannot be priced, return an unknown result rather than a partial total that would understate cost. Keep the pricing source (`aws-pricing-api`, `hardcoded`, `regional-fallback`, `family-estimate`, or `unknown`) accurate.
+- China fallback instance candidates must be regionally available and respect the requested architecture, including AMD types where available. Filter out known unavailable families; do not expose generic global fallback types as China offerings.
+
 ### GPU (allocation-based, core v1 only)
 - Count: `nvidia.com/gpu.count` **node label wins** (MIG/time-slicing inflates `Status.Capacity`); fallback to `Status.Capacity["nvidia.com/gpu"]`. Model from `nvidia.com/gpu.product` label.
 - Memory (MiB): node total = `nvidia.com/gpu.memory` (per-GPU MiB) x count, else `Status.Capacity["nvidia.com/gpumem"]` (HAMi node total); 0 = unknown (memory UI hidden).
@@ -113,6 +126,7 @@ type NodeInfo struct {
 ### Data Endpoints
 - `GET /api/v1/nodepools` - List all NodePools with actual node data
 - `GET /api/v1/nodes` - Get all nodes with usage data
+- `GET /api/v1/config` - Runtime configuration including `aws.region` and `aws.currency`; frontend uses these to format cost values regionally
 - `GET /api/v1/cluster/summary` - Cluster-wide statistics
 - `GET /api/v1/serving` - Inference health for detected LLM serving pods (vLLM/sglang); per pod: model, KV cache %, running/waiting, TTFT (mean+p95), E2E latency (`e2eSeconds`/`e2eP95Seconds`, mean+p95), preemptions, `tokensPerSec`, `requestsPerSec` (rates derived from counter diffs, nil on first sample or when the upstream metric is absent), placement (`node` = node name, `nodeHostname` = `kubernetes.io/hostname` label falling back to the node name, `nodeInstanceType`, `gpuModel`, `gpuCapacity` — filled server-side via `kubernetes.Client.GetNodePlacement` from node labels), and `gpuDevices` (specific physical GPU cards, `{uuid,model,memoryMiB,index}` from the HAMi/KAI `hami.io/vgpu-devices-allocated` annotation — only present on HAMi/KAI clusters). The serving card displays `nodeHostname` (click-to-copy copies `node`).
 - `GET /api/v1/serving/history?window=6h` - Per-pod serving metric trends. A background sampler (same 60s interval as the cluster trends, `Server.startServingHistorySampler` → `Server.sampleServing`) probes serving pods on each tick and appends a sample to the in-memory `servinghistory.Store` (retention = `HISTORY_WINDOW_HOURS`). Returns per pod `{namespace, name, window, points[], lastIssue}`; `lastIssue` is the Unix time of the most recent sample in the window where the pod was offline / `waiting>0` / `preemptions>0` / KV cache ≥ 85% (0 = none). In-memory only — resets on restart
@@ -148,11 +162,13 @@ type NodeInfo struct {
   - Instance type
   - Actual capacity type (spot = 25% of on-demand, on-demand = full price)
 - **Recommended Cost**: Based on recommended instance types and capacity type
-- **Use AWS Pricing API** first, then cache, then family-based estimation, then Ollama fallback
+- **Currency is region-dependent**: commercial regions use USD; China regions `cn-north-1` and `cn-northwest-1` use CNY. Propagate currency metadata and format UI costs accordingly.
+- **Price source order**: live AWS Pricing API (cached by the pricing client), applicable dated regional snapshot/fallback, then an allowed family estimate. `us-east-1` USD snapshots/family estimates are never reused in other regions; China must not fall back to USD estimates. A known regional no-product response is not an API outage and must not be masked by a fallback snapshot.
+- If any instance in a mixed configuration has no valid price, return an unknown cost instead of summing only the priced subset.
 
 ### 4. Instance Type Selection
 - **Query AWS Pricing API** for available instance types (future-proof)
-- **Filter by architecture** (arm64 vs amd64)
+- **Filter available types by configured region and architecture** (arm64 vs amd64); China offline candidates must be China-available and may include AMD types
 - **Filter by CPU/Memory ratio** (memory-optimized, CPU-optimized, general-purpose)
 - **Try combinations** of 1-3 instance types
 - **Sort by cost efficiency** (cost per unit of capacity)
@@ -163,7 +179,13 @@ type NodeInfo struct {
 - **Only count scheduled pods** (with `spec.nodeName` set)
 - **Exclude terminating/terminal pods** (Succeeded, Failed phases)
 
-### 6. Frontend Format Support
+### 6. Pricing and Currency Tests
+- Cover China endpoint/location/currency mappings, commercial endpoint preferences, and transient-only failover behavior.
+- Verify currency extraction reads CNY for China and USD for commercial regions, and check UI formatting for each.
+- Test regional index filtering, negative-cached no-product responses, and the distinction between unavailable pricing and transient API failures.
+- Verify China fallback candidate availability for both architectures and ensure `us-east-1` fallback prices are not reused in other regions.
+
+### 7. Frontend Format Support
 - **Support both formats**: Old (`NodePoolRecommendation`) and new (`NodePoolCapacityRecommendation`)
 - **Detect format** using `recommendation.nodePoolName !== undefined`
 - **Map fields appropriately** for backward compatibility
@@ -188,8 +210,10 @@ type NodeInfo struct {
   - `GetNodeDisruptions()` - Tracks node disruptions (FailedDraining events + deletion-marked nodes); fetches pods/PDBs in batch (no per-node fan-out) and attaches `capacityType`
 
 - `internal/awspricing/client.go` - AWS Pricing API
-  - `GetProductPrice()` - Gets instance pricing (on-demand or spot)
-  - `GetAvailableEC2InstanceTypes()` - Lists available instance types from AWS
+  - `GetProductPrice()` - Gets regional instance pricing (on-demand or estimated spot), with currency-aware parsing, caching, and transient-only endpoint failover
+  - `GetAvailableEC2InstanceTypes()` - Lists instance types whose Pricing API product location matches the configured AWS region
+  - `PricingCurrencyForRegion()` - Selects USD for commercial regions and CNY for China
+- `frontend/src/lib/currency.js` - Region-context currency formatting helpers used for cost values across the UI
 
 - `internal/api/server.go` - API endpoints
   - `getRecommendations()` - Main recommendation endpoint
@@ -225,7 +249,7 @@ type NodeInfo struct {
 4. **Cost validation**: Skip recommendations that increase cost by >10%
 
 ### Instance Type Rules
-1. **Query the AWS Pricing API first** for available types (future-proof); a hardcoded fallback list is used only when the AWS API is unavailable (offline/no credentials)
+1. **Query the AWS Pricing API first** for available types (future-proof); when regional discovery is unavailable, use hardcoded candidates filtered for the configured region and architecture
 2. **Filter GPU instances** unless workloads require GPU
 3. **Respect architecture** (arm64 vs amd64)
 4. **Limit combinations** to 1-3 instance types
@@ -274,6 +298,10 @@ type NodeInfo struct {
 - **Test capacity types**: Both spot and on-demand scenarios
 - **Test cost validation**: Recommendations that increase cost should be skipped
 - **Test AWS API fallback**: When AWS API fails, should use hardcoded list
+- **Test regional pricing**: China CNY and endpoint/location mapping; commercial endpoint preference and transient-only failover; regional product discovery filtering
+- **Test regional fallback safety**: Do not reuse `us-east-1` estimates across regions, mask explicit no-price results, or return partial mixed-instance totals
+- **Test currency formatting**: China cost values display `CN¥`; commercial values display `$`
+- **Test China candidates**: Offline candidates are region-available and respect both arm64 and amd64 architecture, including AMD types where offered
 - **Test Ollama integration**: Should gracefully handle Ollama unavailability
 
 ## Environment Variables
@@ -361,6 +389,8 @@ Before marking any task complete, verify:
 
 ## Recent Changes
 
+- **Region-aware AWS pricing**: China partition pricing for Beijing/Ningxia is returned in CNY; commercial Pricing API calls use geography-aware endpoint preference with transient-error failover, region-matched product discovery, and currency-aware UI formatting. `us-east-1` and China fallback snapshots are kept region-specific, and unavailable regional products are not disguised as priced.
+- **China recommendation candidates**: China fallback candidates filter unavailable families and include available AMD types while respecting the requested architecture.
 - **LiteLLM AI-Gateway Health**: `GET /api/v1/serving/gateway` + Serving-tab Gateway card (fleet stats, usage split by **App / API key / Team** (`metadata_trace_name` / `api_key_alias` / `team_alias`) — top-level table + expandable per-model detail, overhead-vs-model latency split, 401 hint via `LITELLM_METRICS_API_KEY`)
 - **Karpenter Log Analyzer**: Analyze error logs with AI-powered explanations
 - **NodePool-based recommendations**: Primary recommendation engine

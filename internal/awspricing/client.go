@@ -3,9 +3,11 @@ package awspricing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -18,12 +20,17 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/pricing"
 	"github.com/aws/aws-sdk-go-v2/service/pricing/types"
+	"github.com/aws/smithy-go"
 )
 
 // SpotDiscountFactor is the fraction of on-demand price we estimate spot instances to cost.
 // The AWS Pricing API has no spot prices, so this is a conservative heuristic: spot is
 // typically 60-90% cheaper than on-demand, and 25% of on-demand is a common middle estimate.
 const SpotDiscountFactor = 0.25
+
+// ErrNoPricingFound indicates that a product is not priced in the target region.
+// This is an expected result when an instance type is unavailable regionally.
+var ErrNoPricingFound = errors.New("no pricing found")
 
 // getLocationForRegion maps AWS region to Pricing API location format
 func getLocationForRegion(region string) string {
@@ -49,6 +56,8 @@ func getLocationForRegion(region string) string {
 		"ap-northeast-3": "Asia Pacific (Osaka)",
 		"ca-central-1":   "Canada (Central)",
 		"ca-west-1":      "Canada West (Calgary)",
+		"cn-north-1":     "China (Beijing)",
+		"cn-northwest-1": "China (Ningxia)",
 		"eu-west-1":      "EU (Ireland)",
 		"eu-west-2":      "EU (London)",
 		"eu-west-3":      "EU (Paris)",
@@ -71,6 +80,90 @@ func getLocationForRegion(region string) string {
 	return "EU (Ireland)"
 }
 
+// PricingCurrencyForRegion returns the currency used by AWS Pricing for the
+// target region. China partition pricing is denominated in CNY; commercial
+// partition prices are denominated in USD.
+func PricingCurrencyForRegion(region string) string {
+	if strings.HasPrefix(region, "cn-") {
+		return "CNY"
+	}
+	return "USD"
+}
+
+// pricingAPIEndpoint returns a region-specific endpoint override when the
+// Pricing API is hosted outside the standard AWS commercial partition.
+func pricingAPIEndpoint(region string) string {
+	switch region {
+	case "cn-north-1", "cn-northwest-1":
+		return "https://api.pricing.cn-northwest-1.amazonaws.com.cn"
+	default:
+		return ""
+	}
+}
+
+// pricingAPIRegions returns commercial Pricing API endpoints in preference
+// order for the target region. China is a separate partition and must not
+// fall back to commercial endpoints.
+func pricingAPIRegions(region string) []string {
+	if pricingAPIEndpoint(region) != "" {
+		return []string{"cn-northwest-1"}
+	}
+
+	primary := "us-east-1"
+	switch {
+	case strings.HasPrefix(region, "ap-"):
+		primary = "ap-south-1"
+	case strings.HasPrefix(region, "eu-"), strings.HasPrefix(region, "af-"),
+		strings.HasPrefix(region, "me-"):
+		primary = "eu-central-1"
+	}
+
+	ordered := []string{primary}
+	for _, candidate := range []string{"us-east-1", "eu-central-1", "ap-south-1"} {
+		if candidate != primary {
+			ordered = append(ordered, candidate)
+		}
+	}
+	return ordered
+}
+
+// isRetryablePricingError reports transient failures that may succeed through
+// another endpoint; request and authorization failures are not retried.
+func isRetryablePricingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "Throttling", "ThrottlingException", "TooManyRequestsException",
+			"RequestTimeout", "RequestTimeoutException", "PriorRequestNotComplete",
+			"InternalError", "InternalFailure", "ServiceUnavailable":
+			return true
+		}
+		var statusErr interface{ HTTPStatusCode() int }
+		if errors.As(err, &statusErr) && statusErr.HTTPStatusCode() >= http.StatusInternalServerError {
+			return true
+		}
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+// pricingIndexBaseURL returns the host serving bulk pricing indexes for a
+// region's AWS partition.
+func pricingIndexBaseURL(region string) string {
+	switch region {
+	case "cn-north-1", "cn-northwest-1":
+		return "https://pricing.cn-northwest-1.amazonaws.com.cn"
+	default:
+		return "https://pricing.us-east-1.amazonaws.com"
+	}
+}
+
 // Client handles AWS Pricing API requests
 type Client struct {
 	httpClient         *http.Client
@@ -83,6 +176,7 @@ type Client struct {
 	instanceTypesCache map[string]cachedInstanceTypes // Cache for instance types list
 	instanceTypesMu    sync.RWMutex                   // Mutex for instance types cache
 	pricingClient      *pricing.Client                // AWS SDK Pricing client (REQUIRED)
+	pricingClients     []*pricing.Client              // Ordered regional clients for transient-error failover
 	useGetProducts     bool                           // Always true - GetProducts API is the only option
 }
 
@@ -93,6 +187,7 @@ type cachedInstanceTypes struct {
 
 type cachedPrice struct {
 	price     float64
+	err       error
 	expiresAt time.Time
 }
 
@@ -111,7 +206,7 @@ func NewClient(region, accessKeyID, secretAccessKey, sessionToken string) (*Clie
 		longHttpClient: &http.Client{
 			Timeout: 60 * time.Second, // For instance types list queries (if needed)
 		},
-		baseURL:            "https://pricing.us-east-1.amazonaws.com",
+		baseURL:            pricingIndexBaseURL(region),
 		region:             region,
 		cache:              make(map[string]cachedPrice),
 		instanceTypesCache: make(map[string]cachedInstanceTypes),
@@ -119,14 +214,10 @@ func NewClient(region, accessKeyID, secretAccessKey, sessionToken string) (*Clie
 		useGetProducts:     true,           // Always use GetProducts API
 	}
 
-	// Initialize AWS SDK client - REQUIRED for GetProducts API
-	// AWS Pricing API GetProducts is only available in us-east-1 and ap-south-1 regions
-	// Even if the user specifies a different region (like eu-west-1), we need to use us-east-1 for the Pricing API endpoint
-	// The location filter in the query will still use the user's specified region for pricing data
-	pricingRegion := "us-east-1"
-	if region == "ap-south-1" {
-		pricingRegion = "ap-south-1"
-	}
+	// Initialize AWS SDK clients for the preferred endpoint and its failover
+	// peers. The location filter continues to use the target region's prices.
+	pricingRegions := pricingAPIRegions(region)
+	pricingRegion := pricingRegions[0]
 
 	// Create Pricing client with the correct region endpoint
 	// Try explicit credentials first, then default credentials (IAM role, env vars, etc.)
@@ -166,7 +257,20 @@ func NewClient(region, accessKeyID, secretAccessKey, sessionToken string) (*Clie
 			"or configure credentials via ~/.aws/credentials, or use IAM role", err)
 	}
 
-	client.pricingClient = pricing.NewFromConfig(pricingCfg)
+	for _, endpointRegion := range pricingRegions {
+		regionForClient := endpointRegion
+		options := []func(*pricing.Options){func(options *pricing.Options) {
+			options.Region = regionForClient
+		}}
+		if endpoint := pricingAPIEndpoint(region); endpoint != "" {
+			options = append(options, func(options *pricing.Options) {
+				options.BaseEndpoint = aws.String(endpoint)
+			})
+		}
+		client.pricingClients = append(client.pricingClients,
+			pricing.NewFromConfig(pricingCfg, options...))
+	}
+	client.pricingClient = client.pricingClients[0]
 	client.useGetProducts = true
 
 	return client, nil
@@ -185,7 +289,7 @@ func (c *Client) GetProductPrice(ctx context.Context, instanceType, capacityType
 	if cached, ok := c.cache[cacheKey]; ok {
 		if time.Now().Before(cached.expiresAt) {
 			c.cacheMu.RUnlock()
-			return cached.price, nil
+			return cached.price, cached.err
 		}
 	}
 	c.cacheMu.RUnlock()
@@ -198,7 +302,14 @@ func (c *Client) GetProductPrice(ctx context.Context, instanceType, capacityType
 	// Make API call only if not in cache
 	price, err := c.queryGetProducts(ctx, instanceType, capacityType)
 	if err != nil {
-		log.Printf("Warning: Failed to get price for %s (%s): %v", instanceType, capacityType, err)
+		if errors.Is(err, ErrNoPricingFound) {
+			// Regional unavailability is expected and stable enough to negative-cache.
+			c.cacheMu.Lock()
+			c.cache[cacheKey] = cachedPrice{err: err, expiresAt: time.Now().Add(c.cacheTTL)}
+			c.cacheMu.Unlock()
+		} else {
+			log.Printf("Warning: Failed to get price for %s (%s): %v", instanceType, capacityType, err)
+		}
 		return 0, err
 	}
 
@@ -299,13 +410,21 @@ func (c *Client) queryGetProducts(ctx context.Context, instanceType, capacityTyp
 			MaxResults:  aws.Int32(1), // We only need one result
 		}
 
-		result, err := c.pricingClient.GetProducts(queryCtx, input)
+		pricingClients := c.pricingClients
+		if len(pricingClients) == 0 {
+			pricingClients = []*pricing.Client{c.pricingClient}
+		}
+		clientIndex := attempt
+		if clientIndex >= len(pricingClients) {
+			clientIndex %= len(pricingClients)
+		}
+		result, err := pricingClients[clientIndex].GetProducts(queryCtx, input)
 		cancel()
 
 		if err == nil {
 			// Success! Parse and return the result
 			if len(result.PriceList) == 0 {
-				return 0, fmt.Errorf("no pricing found for instance type %s", instanceType)
+				return 0, fmt.Errorf("%w for instance type %s", ErrNoPricingFound, instanceType)
 			}
 
 			// Parse the first result (should be the only one)
@@ -396,15 +515,11 @@ func (c *Client) queryGetProducts(ctx context.Context, instanceType, capacityTyp
 		}
 
 		lastErr = err
-		// Check if it's a timeout/context deadline error - retry these
-		errStr := err.Error()
-		if strings.Contains(errStr, "context deadline exceeded") ||
-			strings.Contains(errStr, "timeout") ||
-			strings.Contains(errStr, "deadline") {
-			// Continue to retry
+		if isRetryablePricingError(err) {
 			continue
 		}
-		// For other errors (like invalid credentials, not found, etc.), don't retry
+		// For other errors (like invalid credentials, invalid parameters, or
+		// not found), another endpoint will not help.
 		return 0, fmt.Errorf("GetProducts API failed: %w", err)
 	}
 
@@ -519,10 +634,10 @@ func (c *Client) extractPriceFromTerms(terms map[string]interface{}, productID, 
 				continue
 			}
 
-			// Try USD first, then other currencies
-			if usdPrice, ok := pricePerUnit["USD"].(string); ok {
+			currency := PricingCurrencyForRegion(c.region)
+			if unitPrice, ok := pricePerUnit[currency].(string); ok {
 				var price float64
-				if _, err := fmt.Sscanf(usdPrice, "%f", &price); err == nil && price > 0 {
+				if _, err := fmt.Sscanf(unitPrice, "%f", &price); err == nil && price > 0 {
 					return price, nil
 				}
 			}
@@ -548,14 +663,14 @@ func (c *Client) extractPriceFromDimension(priceData interface{}) (float64, erro
 		return 0, fmt.Errorf("pricePerUnit not found in dimension, available keys: %v", keys)
 	}
 
-	// Try USD first, then other currencies
-	if usdPrice, ok := pricePerUnit["USD"].(string); ok {
+	currency := PricingCurrencyForRegion(c.region)
+	if unitPrice, ok := pricePerUnit[currency].(string); ok {
 		var price float64
-		_, err := fmt.Sscanf(usdPrice, "%f", &price)
+		_, err := fmt.Sscanf(unitPrice, "%f", &price)
 		if err == nil && price > 0 {
 			return price, nil
 		}
-		return 0, fmt.Errorf("failed to parse USD price string '%s': %v", usdPrice, err)
+		return 0, fmt.Errorf("failed to parse %s price string '%s': %v", currency, unitPrice, err)
 	}
 
 	// Log available currencies for debugging
@@ -563,7 +678,7 @@ func (c *Client) extractPriceFromDimension(priceData interface{}) (float64, erro
 	for k := range pricePerUnit {
 		currencies = append(currencies, k)
 	}
-	return 0, fmt.Errorf("USD not found in pricePerUnit, available currencies: %v", currencies)
+	return 0, fmt.Errorf("%s not found in pricePerUnit, available currencies: %v", currency, currencies)
 }
 
 // QueryPricingAPIWithFilters queries AWS Pricing API with specific filters
@@ -698,6 +813,13 @@ func (c *Client) GetAvailableEC2InstanceTypes(ctx context.Context, architecture 
 			continue
 		}
 
+		// The index can include offerings outside the target location. Never
+		// advertise those as candidates for this region (especially China).
+		location, _ := attributes["location"].(string)
+		if location != getLocationForRegion(c.region) {
+			continue
+		}
+
 		// Check if this is an EC2 instance (not a reserved instance or other product)
 		productFamily, _ := attributes["productFamily"].(string)
 		if productFamily != "Compute Instance" && productFamily != "Dedicated Host" {
@@ -713,18 +835,15 @@ func (c *Client) GetAvailableEC2InstanceTypes(ctx context.Context, architecture 
 		// Filter by architecture if specified
 		if architecture != "" {
 			productArch, _ := attributes["processorArchitecture"].(string)
+			isARM := strings.Contains(strings.ToLower(productArch), "arm")
 			if architectureLower == "arm64" {
-				// ARM/Graviton instances
-				if !strings.Contains(strings.ToLower(productArch), "arm") &&
-					!strings.Contains(strings.ToLower(instanceType), "g") &&
-					!strings.Contains(strings.ToLower(instanceType), "gd") {
+				// AWS product metadata distinguishes ARM from x86 instance types.
+				if !isARM {
 					continue
 				}
 			} else if architectureLower == "amd64" || architectureLower == "x86_64" {
 				// x86 instances (exclude ARM)
-				if strings.Contains(strings.ToLower(productArch), "arm") ||
-					strings.Contains(strings.ToLower(instanceType), "g") ||
-					strings.Contains(strings.ToLower(instanceType), "gd") {
+				if isARM {
 					continue
 				}
 			}

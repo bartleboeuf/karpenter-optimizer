@@ -3,6 +3,7 @@ package recommender
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -23,23 +24,30 @@ type ProgressCallback func(message string, progress float64)
 type PricingSource string
 
 const (
-	PricingSourceAWSPricingAPI PricingSource = "aws-pricing-api"
-	PricingSourceHardcoded     PricingSource = "hardcoded"
+	PricingSourceAWSPricingAPI  PricingSource = "aws-pricing-api"
+	PricingSourceHardcoded      PricingSource = "hardcoded"
+	PricingSourceRegionalFallback PricingSource = "regional-fallback"
 	PricingSourceFamilyEstimate PricingSource = "family-estimate"
 	PricingSourceUnknown        PricingSource = "unknown"
 )
 
 // PricingResult contains cost information and its source
 type PricingResult struct {
-	Cost   float64       `json:"cost"`
-	Source PricingSource `json:"source"`
+	Cost     float64       `json:"cost"`
+	Currency string        `json:"currency"`
+	Source   PricingSource `json:"source"`
 }
 
 type Recommender struct {
-	config       *config.Config
-	k8sClient    *kubernetes.Client
-	llmClient *ollama.Client
-	awsPricing   *awspricing.Client // AWS Pricing API client
+	config     *config.Config
+	k8sClient  *kubernetes.Client
+	llmClient  *ollama.Client
+	awsPricing pricingProvider
+}
+
+type pricingProvider interface {
+	GetProductPrice(context.Context, string, string) (float64, error)
+	GetAvailableEC2InstanceTypes(context.Context, string) ([]string, error)
 }
 
 // HasLLM returns true if LLM client is configured and available
@@ -56,7 +64,7 @@ func NewRecommender(cfg *config.Config) *Recommender {
 		llmURL = cfg.OllamaURL
 		llmModel = cfg.OllamaModel
 	}
-	
+
 	// Bedrock needs no URL (it uses the AWS SDK), so create the client for it
 	// explicitly instead of relying on the default URL from config.Load().
 	if llmURL != "" || cfg.LLMProvider == "bedrock" {
@@ -90,9 +98,9 @@ func NewRecommender(cfg *config.Config) *Recommender {
 	}
 
 	return &Recommender{
-		config:       cfg,
-		llmClient:    llmClient,
-		awsPricing:   awsPricingClient,
+		config:     cfg,
+		llmClient:  llmClient,
+		awsPricing: awsPricingClient,
 	}
 }
 
@@ -1274,7 +1282,7 @@ func (r *Recommender) optimizeNodePool(np kubernetes.NodePoolInfo, workloads []W
 	// Only recommend GPU if workloads actually need GPU
 	if maxGPU == 0 {
 		// No GPU needed - use regular instances
-		cpuPerNode := math.Max(totalCPU/4.0, 1.0) // Rough estimate for general purpose nodes, minimum 1
+		cpuPerNode := math.Max(totalCPU/4.0, 1.0)       // Rough estimate for general purpose nodes, minimum 1
 		memoryPerNode := math.Max(totalMemory/8.0, 1.0) // Minimum 1
 
 		recommendedInstanceTypes := r.selectInstanceTypes(cpuPerNode, memoryPerNode, 0) // Explicitly 0 GPU
@@ -1389,7 +1397,7 @@ func (r *Recommender) optimizeNodePool(np kubernetes.NodePoolInfo, workloads []W
 	} else {
 		// GPU workloads - handle separately
 		// Calculate instance types based on actual CPU/memory requirements, not hardcoded values
-		cpuPerNode := math.Max(totalCPU/4.0, 1.0) // Minimum 1
+		cpuPerNode := math.Max(totalCPU/4.0, 1.0)       // Minimum 1
 		memoryPerNode := math.Max(totalMemory/8.0, 1.0) // Minimum 1
 
 		recommendedInstanceTypes := r.selectInstanceTypes(cpuPerNode, memoryPerNode, maxGPU)
@@ -1753,7 +1761,7 @@ func (r *Recommender) generateRecommendationForGroup(group []Workload, index int
 	capacityType := r.selectCapacityType(group, false) // Not checking overprovisioning in this path
 	architecture := r.selectArchitecture(group)
 
-		recommendedCost := r.estimateCost(context.Background(), instanceTypes, capacityType, nodesNeeded)
+	recommendedCost := r.estimateCost(context.Background(), instanceTypes, capacityType, nodesNeeded)
 
 	// Try to get actual current state from existing NodePools
 	var currentState *CurrentState
@@ -2012,9 +2020,65 @@ func (r *Recommender) estimateCost(ctx context.Context, instanceTypes []string, 
 	return result.Cost
 }
 
+// chinaOnDemandFallbackPricesCNY contains a snapshot of regional China Linux,
+// shared-tenancy on-demand hourly prices queried from AWS Pricing on 2026-10-19.
+// These are emergency price estimates only: a fresh explicit no-product result
+// must not be overridden, because that indicates the type is not priced there.
+var chinaOnDemandFallbackPricesCNY = map[string]map[string]float64{
+	"cn-north-1": {
+		"c5a.xlarge": 1.328, "c5a.2xlarge": 2.656, "c5a.4xlarge": 5.312, "c5a.8xlarge": 10.625,
+		"m5a.xlarge": 1.821, "m5a.2xlarge": 3.642, "m5a.4xlarge": 7.284, "m5a.8xlarge": 14.568,
+		"r5a.xlarge": 2.193, "r5a.2xlarge": 4.387, "r5a.4xlarge": 8.774, "r5a.8xlarge": 17.548,
+		"t3a.xlarge": 0.9464, "t3a.2xlarge": 1.8928,
+		"m6i.xlarge": 2.02642, "m6i.2xlarge": 4.05283, "m6i.4xlarge": 8.10566, "m6i.8xlarge": 16.21133,
+		"c6i.xlarge": 1.47874, "c6i.2xlarge": 2.95747, "c6i.4xlarge": 5.91494,
+		"r6i.xlarge": 2.43718, "r6i.2xlarge": 4.87435, "r6i.4xlarge": 9.74870,
+		"r8i.xlarge": 2.68706, "r8i.2xlarge": 5.37411,
+		"t3.xlarge": 1.05150, "t3.2xlarge": 2.10310,
+		"m6g.xlarge": 1.60740, "m6g.2xlarge": 3.21490, "m6g.4xlarge": 6.42980,
+		"m7g.xlarge": 1.72250, "m7g.2xlarge": 3.44490, "m7g.4xlarge": 6.88980,
+		"m8g.xlarge": 1.72245, "m8g.2xlarge": 3.44491,
+		"c6g.xlarge": 1.17200, "c6g.2xlarge": 2.34410, "c6g.4xlarge": 4.68810,
+		"c7g.xlarge": 1.25690, "c7g.2xlarge": 2.51390, "c7g.4xlarge": 5.02770,
+		"c6gn.xlarge": 1.48914, "c6gn.2xlarge": 2.97828,
+		"r6g.xlarge": 1.93330, "r6g.2xlarge": 3.86660, "r6g.4xlarge": 7.73320,
+		"r7g.xlarge": 2.07300, "r7g.2xlarge": 4.14590, "r7g.4xlarge": 8.29190,
+		"t4g.xlarge": 0.81060, "t4g.2xlarge": 1.62110,
+	},
+	"cn-northwest-1": {
+		"c5a.xlarge": 0.89, "c5a.2xlarge": 1.78, "c5a.4xlarge": 3.56, "c5a.8xlarge": 7.12,
+		"m5a.xlarge": 1.219, "m5a.2xlarge": 2.437, "m5a.4xlarge": 4.874, "m5a.8xlarge": 9.749,
+		"r5a.xlarge": 1.59, "r5a.2xlarge": 3.179, "r5a.4xlarge": 6.359, "r5a.8xlarge": 12.717,
+		"t3a.xlarge": 0.6901, "t3a.2xlarge": 1.3802,
+		"m6i.xlarge": 1.35551, "m6i.2xlarge": 2.71102, "m6i.4xlarge": 5.42203, "m6i.8xlarge": 10.84406,
+		"c6i.xlarge": 0.98582, "c6i.2xlarge": 1.97165, "c6i.4xlarge": 3.94330,
+		"r6i.xlarge": 1.76627, "r6i.2xlarge": 3.53254, "r6i.4xlarge": 7.06507,
+		"r8i.xlarge": 1.94728, "r8i.2xlarge": 3.89455,
+		"t3.xlarge": 0.76680, "t3.2xlarge": 1.53350,
+		"m6g.xlarge": 1.07620, "m6g.2xlarge": 2.15240, "m6g.4xlarge": 4.30480,
+		"m7g.xlarge": 1.07620, "m7g.2xlarge": 2.15240, "m7g.4xlarge": 4.30480,
+		"m8g.xlarge": 1.07619, "m8g.2xlarge": 2.15238,
+		"c6g.xlarge": 0.78320, "c6g.2xlarge": 1.56640, "c6g.4xlarge": 3.13270,
+		"c7g.xlarge": 0.78320, "c7g.2xlarge": 1.56640, "c7g.4xlarge": 3.13270,
+		"c6gn.xlarge": 0.99513, "c6gn.2xlarge": 1.99027,
+		"r6g.xlarge": 1.40210, "r6g.2xlarge": 2.80410, "r6g.4xlarge": 5.60820,
+		"r7g.xlarge": 1.40210, "r7g.2xlarge": 2.80410, "r7g.4xlarge": 5.60820,
+		"t4g.xlarge": 0.59150, "t4g.2xlarge": 1.18300,
+	},
+}
+
+func chinaOnDemandFallbackPrice(region, instanceType string) (float64, bool) {
+	prices, ok := chinaOnDemandFallbackPricesCNY[region]
+	if !ok {
+		return 0, false
+	}
+	price, ok := prices[strings.ToLower(instanceType)]
+	return price, ok
+}
+
 func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes []string, capacityType string, nodeCount int) (PricingResult, map[string]PricingSource) {
-	// On-demand pricing (USD per hour) - US East (N. Virginia) region
-	// Prices are from AWS Pricing API (approximate, may vary by region and time)
+	// US East (N. Virginia) on-demand USD snapshot, queried from AWS Pricing
+	// on 2026-10-19. Use only in us-east-1.
 	onDemandPrices := map[string]float64{
 		// T3 family (burstable)
 		"t3.medium":  0.0416,
@@ -2046,7 +2110,6 @@ func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes 
 		"c6a.4xlarge": 0.612,
 		"c6a.8xlarge": 1.224,
 		// R6i family (memory optimized)
-		"r6i.medium":  0.063, // 1 vCPU, 8 GiB
 		"r6i.large":   0.126, // 2 vCPU, 16 GiB
 		"r6i.xlarge":  0.252, // 4 vCPU, 32 GiB
 		"r6i.2xlarge": 0.504, // 8 vCPU, 64 GiB
@@ -2059,26 +2122,26 @@ func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes 
 		"r6a.4xlarge": 0.9072,
 		"r6a.8xlarge": 1.8144,
 		// R8i family (memory optimized, latest gen)
-		"r8i.xlarge":  0.2778, // 4 vCPU, 32 GiB
-		"r8i.2xlarge": 0.5556, // 8 vCPU, 64 GiB
-		"r8i.4xlarge": 1.1112, // 16 vCPU, 128 GiB
+		"r8i.xlarge":  0.27784, // 4 vCPU, 32 GiB; AWS Pricing queried 2026-10-19
+		"r8i.2xlarge": 0.55568, // 8 vCPU, 64 GiB
+		"r8i.4xlarge": 1.11136, // 16 vCPU, 128 GiB
 		// X2gd family (Graviton2, memory optimized)
-		"x2gd.large":   0.0334, // 2 vCPU, 16 GiB
-		"x2gd.xlarge":  0.0669, // 4 vCPU, 32 GiB
-		"x2gd.2xlarge": 0.1338, // 8 vCPU, 64 GiB
-		"x2gd.4xlarge": 0.2676, // 16 vCPU, 128 GiB
+		"x2gd.large":   0.167, // 2 vCPU, 16 GiB
+		"x2gd.xlarge":  0.334, // 4 vCPU, 32 GiB
+		"x2gd.2xlarge": 0.668, // 8 vCPU, 64 GiB
+		"x2gd.4xlarge": 1.336, // 16 vCPU, 128 GiB
 		// X8g family (Graviton3, general purpose)
-		"x8g.large":   0.0336, // 2 vCPU, 16 GiB
-		"x8g.xlarge":  0.0672, // 4 vCPU, 32 GiB
-		"x8g.2xlarge": 0.1344, // 8 vCPU, 64 GiB
-		"x8g.4xlarge": 0.2688, // 16 vCPU, 128 GiB
+		"x8g.large":   0.1954, // 2 vCPU, 16 GiB
+		"x8g.xlarge":  0.3908, // 4 vCPU, 32 GiB
+		"x8g.2xlarge": 0.7816, // 8 vCPU, 64 GiB
+		"x8g.4xlarge": 1.5632, // 16 vCPU, 128 GiB
 		// M6g family (Graviton2, general purpose ARM)
-		"m6g.medium":  0.0384, // 1 vCPU, 4 GiB
-		"m6g.large":   0.0768, // 2 vCPU, 8 GiB
-		"m6g.xlarge":  0.1536, // 4 vCPU, 16 GiB
-		"m6g.2xlarge": 0.3072, // 8 vCPU, 32 GiB
-		"m6g.4xlarge": 0.6144, // 16 vCPU, 64 GiB
-		"m6g.8xlarge": 1.2288, // 32 vCPU, 128 GiB
+		"m6g.medium":  0.0385, // 1 vCPU, 4 GiB
+		"m6g.large":   0.077,  // 2 vCPU, 8 GiB
+		"m6g.xlarge":  0.154,  // 4 vCPU, 16 GiB
+		"m6g.2xlarge": 0.308,  // 8 vCPU, 32 GiB
+		"m6g.4xlarge": 0.616,  // 16 vCPU, 64 GiB
+		"m6g.8xlarge": 1.232,  // 32 vCPU, 128 GiB
 		// C6g family (Graviton2, compute optimized ARM)
 		"c6g.medium":  0.034, // 1 vCPU, 2 GiB
 		"c6g.large":   0.068, // 2 vCPU, 4 GiB
@@ -2096,7 +2159,7 @@ func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes 
 	// Calculate cost like eks-node-viewer: distribute nodes across instance types and sum costs
 	// This matches how eks-node-viewer calculates: cost per node based on instance type, then sum
 	if len(instanceTypes) == 0 || nodeCount == 0 {
-		return PricingResult{Cost: 0.0, Source: PricingSourceUnknown}, make(map[string]PricingSource)
+		return PricingResult{Cost: 0.0, Currency: awspricing.PricingCurrencyForRegion(r.config.AWSRegion), Source: PricingSourceUnknown}, make(map[string]PricingSource)
 	}
 
 	// Distribute nodes evenly across instance types (like Karpenter does)
@@ -2112,10 +2175,13 @@ func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes 
 		var instanceCost float64
 		var priceFound bool
 		var source = PricingSourceUnknown
+		var pricingErr error
 
-		// First, check hardcoded prices (no API call needed)
-		// This reduces AWS Pricing API calls significantly for common instance types
-		if cost, ok := onDemandPrices[itLower]; ok {
+		// This USD snapshot was queried for us-east-1. Do not apply it to other
+		// commercial regions or China, where regional pricing differs.
+		isChinaRegion := strings.HasPrefix(r.config.AWSRegion, "cn-")
+		isUSEast1 := r.config.AWSRegion == "us-east-1"
+		if cost, ok := onDemandPrices[itLower]; ok && isUSEast1 {
 			instanceCost = cost
 			priceFound = true
 			source = PricingSourceHardcoded
@@ -2131,14 +2197,16 @@ func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes 
 			// and apply spot discount internally if capacityType is "spot"
 			awsPrice, err := r.awsPricing.GetProductPrice(pricingCtx, it, capacityType)
 			cancel()
+			pricingErr = err
 
 			if err == nil && awsPrice > 0 {
 				instanceCost = awsPrice
 				priceFound = true
 				source = PricingSourceAWSPricingAPI
 			} else if err != nil {
-				// Only log if it's not a "not found" error (those are expected for some instance types)
-				if !strings.Contains(err.Error(), "not found") {
+				// Missing regional prices are expected when a type is unavailable
+				// in this region; the pricing client negative-caches these results.
+				if !errors.Is(err, awspricing.ErrNoPricingFound) {
 					log.Printf("Warning: AWS Pricing API failed for %s (%s): %v", it, capacityType, err)
 				}
 			} else if awsPrice <= 0 {
@@ -2147,8 +2215,18 @@ func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes 
 			}
 		}
 
+		// Use the dated CNY snapshot only when live pricing could not be queried
+		// (for example timeout/credentials). Never mask an explicit regional miss.
+		if !priceFound && isChinaRegion && !errors.Is(pricingErr, awspricing.ErrNoPricingFound) {
+			if fallbackPrice, ok := chinaOnDemandFallbackPrice(r.config.AWSRegion, itLower); ok {
+				instanceCost = fallbackPrice
+				priceFound = true
+				source = PricingSourceRegionalFallback
+			}
+		}
+
 		// If still not found, try family estimation
-		if !priceFound {
+		if !priceFound && isUSEast1 && !errors.Is(pricingErr, awspricing.ErrNoPricingFound) {
 			instanceCost = r.estimateCostFromFamily(it)
 			if instanceCost > 0 {
 				priceFound = true
@@ -2156,18 +2234,19 @@ func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes 
 			}
 		}
 
-	// Skip this instance type if we couldn't find a price
+		// Do not return a partial total: treating an unpriced member as free
+		// would understate the cost of a mixed instance-type configuration.
 		if !priceFound {
-			continue
+			return PricingResult{Cost: 0, Currency: awspricing.PricingCurrencyForRegion(r.config.AWSRegion), Source: PricingSourceUnknown}, make(map[string]PricingSource)
 		}
 
 		// Track source for this instance type
 		instanceTypeSources[it] = source
-		
+
 		// Set overall source (prefer AWS Pricing API if any instance type used it)
 		if source == PricingSourceAWSPricingAPI {
 			overallSource = PricingSourceAWSPricingAPI
-		} else if overallSource == PricingSourceUnknown || overallSource == PricingSourceAWSPricingAPI {
+		} else if overallSource == PricingSourceUnknown {
 			overallSource = source
 		}
 
@@ -2191,10 +2270,10 @@ func (r *Recommender) estimateCostWithSource(ctx context.Context, instanceTypes 
 
 	// If no prices were found, return unknown source
 	if overallSource == PricingSourceUnknown && totalCost == 0 {
-		return PricingResult{Cost: 0.0, Source: PricingSourceUnknown}, instanceTypeSources
+		return PricingResult{Cost: 0.0, Currency: awspricing.PricingCurrencyForRegion(r.config.AWSRegion), Source: PricingSourceUnknown}, instanceTypeSources
 	}
 
-	return PricingResult{Cost: totalCost, Source: overallSource}, instanceTypeSources
+	return PricingResult{Cost: totalCost, Currency: awspricing.PricingCurrencyForRegion(r.config.AWSRegion), Source: overallSource}, instanceTypeSources
 }
 
 // estimateCostFromFamily estimates cost based on instance family and size
@@ -2237,11 +2316,11 @@ func (r *Recommender) estimateCostFromFamily(instanceType string) float64 {
 	} else if strings.HasPrefix(it, "r6a") {
 		baseCost = 0.2268 // r6a.xlarge on-demand
 	} else if strings.HasPrefix(it, "r8i") {
-		baseCost = 0.2778 // r8i.xlarge on-demand
+		baseCost = 0.27784 // r8i.xlarge on-demand, us-east-1 snapshot (2026-10-19)
 	} else if strings.HasPrefix(it, "x2gd") {
-		baseCost = 0.0669 // x2gd.xlarge on-demand (Graviton2)
+		baseCost = 0.334 // x2gd.xlarge on-demand (Graviton2)
 	} else if strings.HasPrefix(it, "x8g") {
-		baseCost = 0.0672 // x8g.xlarge on-demand (Graviton3)
+		baseCost = 0.3908 // x8g.xlarge on-demand (Graviton3)
 	} else if strings.HasPrefix(it, "m6g") {
 		baseCost = 0.1536 // m6g.xlarge on-demand (Graviton2)
 	} else if strings.HasPrefix(it, "c6g") {

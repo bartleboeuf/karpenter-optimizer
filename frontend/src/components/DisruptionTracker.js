@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Switch } from './ui/switch';
 import { RefreshCw, AlertTriangle, AlertCircle, Loader2, Check, Package, Lightbulb, Clock } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { useCurrencyFormatter } from '../lib/currency';
 
 // Use runtime configuration from window.ENV (set via config.js) or build-time env var
 const API_URL = (window.ENV && window.ENV.hasOwnProperty('REACT_APP_API_URL'))
@@ -98,8 +99,6 @@ const formatTime = (timeStr) => {
   }
 };
 
-const formatCost = (value) => `$${value.toFixed(2)}`;
-
 const getReasonColor = (reason) => {
   const reasonLower = reason?.toLowerCase() || '';
   if (reasonLower.includes('consolidat')) {
@@ -140,6 +139,7 @@ const countBlockingPods = (items) =>
 
 // DisruptionCard renders a single node's disruption state.
 function DisruptionCard({ disruption }) {
+  const currency = useCurrencyFormatter();
   const color = getReasonColor(disruption.reason);
   const isBlocked = disruption.isBlocked || false;
   const pods = disruption.affectedPods || [];
@@ -183,7 +183,7 @@ function DisruptionCard({ disruption }) {
               )}
               {disruption.costPerHour != null && (
                 <span className="text-xs font-semibold text-amber-600" title="Estimated cost while this node still exists">
-                  {formatCost(disruption.costPerHour)}/hr
+                  {currency(disruption.costPerHour)}/hr
                 </span>
               )}
               {pods.length > 0 && (
@@ -325,6 +325,10 @@ function DisruptionCard({ disruption }) {
   );
 }
 
+function formatCost(value, currency) {
+  return currency(value);
+}
+
 const WINDOW_OPTIONS = [
   { value: '1', label: 'Last 1h' },
   { value: '6', label: 'Last 6h' },
@@ -333,6 +337,7 @@ const WINDOW_OPTIONS = [
 ];
 
 function DisruptionTracker() {
+  const currency = useCurrencyFormatter();
   const [disruptions, setDisruptions] = useState([]);
   const [summary, setSummary] = useState(null);
   const [recentDeletions, setRecentDeletions] = useState([]);
@@ -524,7 +529,7 @@ function DisruptionTracker() {
                 <AlertCircle className="h-5 w-5 text-amber-600 shrink-0" />
                 <div className="text-sm">
                   <span className="font-semibold text-amber-800">
-                    {formatCost(summary.totalCostPerHour)}/hr ({formatCost(summary.totalCostPerDay)}/day)
+                    {formatCost(summary.totalCostPerHour, currency)}/hr ({formatCost(summary.totalCostPerDay, currency)}/day)
                   </span>{' '}
                   <span className="text-amber-800/80">
                     still billed across {disruptions.length} disrupted node{disruptions.length !== 1 ? 's' : ''}

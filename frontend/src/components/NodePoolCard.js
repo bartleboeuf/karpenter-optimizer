@@ -6,8 +6,10 @@ import { Separator } from './ui/separator';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from './ui/accordion';
 import { Check, AlertTriangle } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { useCurrencyFormatter } from '../lib/currency';
 
 function NodePoolCard({ recommendation }) {
+  const currency = useCurrencyFormatter();
   if (!recommendation) {
     return <div>Error: No recommendation data</div>;
   }
@@ -120,7 +122,7 @@ function NodePoolCard({ recommendation }) {
             {currentCost > 0 && (
               <div className="mt-2">
                 <p className="text-sm font-semibold">
-                  ${currentCost.toFixed(2)}/hr
+                  {currency(currentCost)}/hr
                 </p>
               </div>
             )}
@@ -160,13 +162,13 @@ function NodePoolCard({ recommendation }) {
             {recommendedCost > 0 && (
               <div className="mt-2">
                 <p className="text-sm font-semibold text-green-600">
-                  ${recommendedCost.toFixed(2)}/hr
+                  {currency(recommendedCost)}/hr
                 </p>
               </div>
             )}
             {costSavings > 0 && (
               <p className="text-xs text-green-600 font-medium mt-2">
-                Savings: ${costSavings.toFixed(2)}/hr ({costSavingsPercent.toFixed(1)}%)
+                Savings: {currency(costSavings)}/hr ({costSavingsPercent.toFixed(1)}%)
               </p>
             )}
           </div>

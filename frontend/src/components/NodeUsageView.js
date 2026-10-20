@@ -13,6 +13,7 @@ import { ChevronDown, RefreshCw, Loader2, Package, Search, X, Regex } from 'luci
 import { cn, formatGPUMem } from '../lib/utils';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { useCurrencyFormatter } from '../lib/currency';
 
 // Use runtime configuration from window.ENV (set via config.js) or build-time env var
 const API_URL = (window.ENV && window.ENV.hasOwnProperty('REACT_APP_API_URL')) 
@@ -20,6 +21,7 @@ const API_URL = (window.ENV && window.ENV.hasOwnProperty('REACT_APP_API_URL'))
   : (process.env.REACT_APP_API_URL || '');
 
 function NodeUsageView() {
+  const currency = useCurrencyFormatter();
   const [nodes, setNodes] = useState([]);
   const [nodePools, setNodePools] = useState([]); // Store NodePools with taints
   const [loading, setLoading] = useState(false);
@@ -585,7 +587,7 @@ function NodeUsageView() {
                                     ? "Using AWS Pricing API" 
                                     : `Using ${nodePoolInfo?.pricingSource || "estimated"} pricing`}
                                 >
-                                  ${estimatedCost.toFixed(2)}/hr
+                                  {currency(estimatedCost)}/hr
                                   {nodePoolInfo?.pricingSource === "aws-pricing-api" && " ✓"}
                                 </Badge>
                               )}
@@ -626,10 +628,10 @@ function NodeUsageView() {
                                 <CardContent className="pt-6">
                                   <p className="text-sm text-muted-foreground mb-2">Estimated Cost</p>
                                   <p className="text-2xl font-bold text-green-600">
-                                    ${estimatedCost.toFixed(2)}/hr
+                                    {currency(estimatedCost)}/hr
                                   </p>
                                   <p className="text-xs text-muted-foreground mt-1">
-                                    ${(estimatedCost * 24).toFixed(2)}/day
+                                    {currency(estimatedCost * 24)}/day
                                   </p>
                                   {nodePoolInfo?.pricingSource && (
                                     <p className="text-xs mt-1">

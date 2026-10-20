@@ -10,32 +10,41 @@ import (
 	"strings"
 	"time"
 
+	"github.com/karpenter-optimizer/internal/awspricing"
 	"github.com/karpenter-optimizer/internal/kubernetes"
 )
 
 // NodePoolCapacityRecommendation represents a recommendation based on actual node capacity
 type NodePoolCapacityRecommendation struct {
-	NodePoolName             string   `json:"nodePoolName"`
-	CurrentNodes             int      `json:"currentNodes"`
-	CurrentInstanceTypes     []string `json:"currentInstanceTypes"`
-	CurrentCPUUsed           float64  `json:"currentCPUUsed"`        // Total CPU used across all nodes
-	CurrentCPUCapacity       float64  `json:"currentCPUCapacity"`    // Total CPU allocatable across all nodes
-	CurrentMemoryUsed         float64  `json:"currentMemoryUsed"`     // Total Memory used across all nodes
-	CurrentMemoryCapacity    float64  `json:"currentMemoryCapacity"` // Total Memory allocatable across all nodes
-	CurrentCost              float64  `json:"currentCost"`           // Current hourly cost
-	RecommendedNodes         int      `json:"recommendedNodes"`
-	RecommendedInstanceTypes []string `json:"recommendedInstanceTypes"`
-	RecommendedTotalCPU      float64  `json:"recommendedTotalCPU"`
-	RecommendedTotalMemory   float64  `json:"recommendedTotalMemory"`
-	RecommendedCost          float64  `json:"recommendedCost"`
-	CostSavings              float64  `json:"costSavings"`        // Hourly cost savings
-	CostSavingsPercent       float64  `json:"costSavingsPercent"` // Percentage savings
-	Reasoning                string   `json:"reasoning"`
-	AIReasoning              string   `json:"aiReasoning,omitempty"` // AI-enhanced explanation (if Ollama is available)
-	Architecture             string   `json:"architecture"`
-	CapacityType             string   `json:"capacityType"`
-	Taints                   []kubernetes.Taint `json:"taints,omitempty"` // Node taints
-	HasRecommendation        bool     `json:"hasRecommendation"` // true if a cost-saving recommendation exists
+	NodePoolName             string             `json:"nodePoolName"`
+	CurrentNodes             int                `json:"currentNodes"`
+	CurrentInstanceTypes     []string           `json:"currentInstanceTypes"`
+	CurrentCPUUsed           float64            `json:"currentCPUUsed"`        // Total CPU used across all nodes
+	CurrentCPUCapacity       float64            `json:"currentCPUCapacity"`    // Total CPU allocatable across all nodes
+	CurrentMemoryUsed        float64            `json:"currentMemoryUsed"`     // Total Memory used across all nodes
+	CurrentMemoryCapacity    float64            `json:"currentMemoryCapacity"` // Total Memory allocatable across all nodes
+	CurrentCost              float64            `json:"currentCost"`           // Current hourly cost
+	Currency                 string             `json:"currency"`
+	RecommendedNodes         int                `json:"recommendedNodes"`
+	RecommendedInstanceTypes []string           `json:"recommendedInstanceTypes"`
+	RecommendedTotalCPU      float64            `json:"recommendedTotalCPU"`
+	RecommendedTotalMemory   float64            `json:"recommendedTotalMemory"`
+	RecommendedCost          float64            `json:"recommendedCost"`
+	CostSavings              float64            `json:"costSavings"`        // Hourly cost savings
+	CostSavingsPercent       float64            `json:"costSavingsPercent"` // Percentage savings
+	Reasoning                string             `json:"reasoning"`
+	AIReasoning              string             `json:"aiReasoning,omitempty"` // AI-enhanced explanation (if Ollama is available)
+	Architecture             string             `json:"architecture"`
+	CapacityType             string             `json:"capacityType"`
+	Taints                   []kubernetes.Taint `json:"taints,omitempty"`  // Node taints
+	HasRecommendation        bool               `json:"hasRecommendation"` // true if a cost-saving recommendation exists
+}
+
+func costCurrencySymbol(region string) string {
+	if awspricing.PricingCurrencyForRegion(region) == "CNY" {
+		return "CN¥"
+	}
+	return "$"
 }
 
 // GenerateRecommendationsFromNodePools generates recommendations based on actual node capacity data
@@ -62,6 +71,7 @@ func (r *Recommender) GenerateRecommendationsFromNodePools(ctx context.Context, 
 				CurrentMemoryUsed:        0,
 				CurrentMemoryCapacity:    0,
 				CurrentCost:              0,
+				Currency:                 awspricing.PricingCurrencyForRegion(r.config.AWSRegion),
 				RecommendedNodes:         0,
 				RecommendedInstanceTypes: []string{},
 				RecommendedTotalCPU:      0,
@@ -207,17 +217,18 @@ func (r *Recommender) GenerateRecommendationsFromNodePools(ctx context.Context, 
 				capacityTypeNote = " Maintaining spot instances. "
 			}
 
-			reasoning = fmt.Sprintf("Current setup: %d nodes providing %.1f CPU cores (%.1f%% used) and %.1f GiB memory (%.1f%% used) at $%.2f/hr. ",
-				np.CurrentNodes, currentCPUCapacity, cpuUtilization, currentMemoryCapacity, memoryUtilization, currentCost)
-			reasoning += fmt.Sprintf("Recommended: %d nodes with %v (%s) providing %.1f CPU cores and %.1f GiB memory at $%.2f/hr.%s",
-				bestNodes, bestTypes, bestCapacityType, recommendedTotalCPU, recommendedTotalMemory, bestCost, capacityTypeNote)
-			reasoning += fmt.Sprintf("Potential savings: $%.2f/hr (%.1f%%).",
-				costSavings, costSavingsPercent)
+			currencySymbol := costCurrencySymbol(r.config.AWSRegion)
+			reasoning = fmt.Sprintf("Current setup: %d nodes providing %.1f CPU cores (%.1f%% used) and %.1f GiB memory (%.1f%% used) at %s%.2f/hr. ",
+				np.CurrentNodes, currentCPUCapacity, cpuUtilization, currentMemoryCapacity, memoryUtilization, currencySymbol, currentCost)
+			reasoning += fmt.Sprintf("Recommended: %d nodes with %v (%s) providing %.1f CPU cores and %.1f GiB memory at %s%.2f/hr.%s",
+				bestNodes, bestTypes, bestCapacityType, recommendedTotalCPU, recommendedTotalMemory, currencySymbol, bestCost, capacityTypeNote)
+			reasoning += fmt.Sprintf("Potential savings: %s%.2f/hr (%.1f%%).",
+				currencySymbol, costSavings, costSavingsPercent)
 
 			if progressCallback != nil {
 				// Calculate progress: ensure it's based on completion
 				progress := float64(i+1) / float64(totalNodePools) * 100.0
-				progressCallback(fmt.Sprintf("Found recommendation for NodePool '%s': %d nodes -> %d nodes, savings: $%.2f/hr (%.1f%%)", np.Name, np.CurrentNodes, bestNodes, costSavings, costSavingsPercent), progress)
+				progressCallback(fmt.Sprintf("Found recommendation for NodePool '%s': %d nodes -> %d nodes, savings: %s%.2f/hr (%.1f%%)", np.Name, np.CurrentNodes, bestNodes, currencySymbol, costSavings, costSavingsPercent), progress)
 			}
 		} else {
 			// No cost savings - use current values as recommended
@@ -231,14 +242,15 @@ func (r *Recommender) GenerateRecommendationsFromNodePools(ctx context.Context, 
 			recommendedTotalCPU = currentCPUCapacity
 			recommendedTotalMemory = currentMemoryCapacity
 
-			reasoning = fmt.Sprintf("Current setup: %d nodes providing %.1f CPU cores (%.1f%% used) and %.1f GiB memory (%.1f%% used) at $%.2f/hr. ",
-				np.CurrentNodes, currentCPUCapacity, cpuUtilization, currentMemoryCapacity, memoryUtilization, currentCost)
+			currencySymbol := costCurrencySymbol(r.config.AWSRegion)
+			reasoning = fmt.Sprintf("Current setup: %d nodes providing %.1f CPU cores (%.1f%% used) and %.1f GiB memory (%.1f%% used) at %s%.2f/hr. ",
+				np.CurrentNodes, currentCPUCapacity, cpuUtilization, currentMemoryCapacity, memoryUtilization, currencySymbol, currentCost)
 			reasoning += "No cost-saving recommendations available. Current configuration is already optimal."
 
 			if progressCallback != nil {
 				// Calculate progress: ensure it's based on completion
 				progress := float64(i+1) / float64(totalNodePools) * 100.0
-				progressCallback(fmt.Sprintf("No recommendation for NodePool '%s' - current cost ($%.2f/hr) is already optimal", np.Name, currentCost), progress)
+				progressCallback(fmt.Sprintf("No recommendation for NodePool '%s' - current cost (%s%.2f/hr) is already optimal", np.Name, currencySymbol, currentCost), progress)
 			}
 		}
 
@@ -251,6 +263,7 @@ func (r *Recommender) GenerateRecommendationsFromNodePools(ctx context.Context, 
 			CurrentMemoryUsed:        currentMemoryUsed,
 			CurrentMemoryCapacity:    currentMemoryCapacity,
 			CurrentCost:              currentCost,
+			Currency:                 awspricing.PricingCurrencyForRegion(r.config.AWSRegion),
 			RecommendedNodes:         bestNodes,
 			RecommendedInstanceTypes: bestTypes,
 			RecommendedTotalCPU:      recommendedTotalCPU,
@@ -291,9 +304,9 @@ Original Explanation:
 
 NodePool Details:
 - Name: %s
-- Current: %d nodes, $%.2f/hr
-- Recommended: %d nodes, $%.2f/hr
-- Savings: $%.2f/hr (%.1f%%)
+- Current: %d nodes, %s%.2f/hr
+- Recommended: %d nodes, %s%.2f/hr
+- Savings: %s%.2f/hr (%.1f%%)
 - Architecture: %s
 - Capacity Type: %s
 
@@ -307,9 +320,12 @@ Return only the enhanced explanation text, no additional formatting.`,
 		baseReasoning,
 		rec.NodePoolName,
 		rec.CurrentNodes,
+		costCurrencySymbol(r.config.AWSRegion),
 		rec.CurrentCost,
 		rec.RecommendedNodes,
+		costCurrencySymbol(r.config.AWSRegion),
 		rec.RecommendedCost,
+		costCurrencySymbol(r.config.AWSRegion),
 		rec.CostSavings,
 		rec.CostSavingsPercent,
 		rec.Architecture,
@@ -330,7 +346,7 @@ Return only the enhanced explanation text, no additional formatting.`,
 			timeout = 5 * time.Second // Minimum timeout
 		}
 	}
-	
+
 	aiCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -383,7 +399,7 @@ Current State:
 - Instance Types: %v
 - CPU Capacity: %.1f cores (%.1f%% used)
 - Memory Capacity: %.1f GiB (%.1f%% used)
-- Current Cost: $%.2f/hr
+- Current Cost: %s%.2f/hr
 - Capacity Type: %s
 
 Recommended State:
@@ -391,9 +407,9 @@ Recommended State:
 - Instance Types: %v
 - CPU Capacity: %.1f cores
 - Memory Capacity: %.1f GiB
-- Recommended Cost: $%.2f/hr
+- Recommended Cost: %s%.2f/hr
 - Capacity Type: %s
-- Cost Savings: $%.2f/hr (%.1f%%)
+- Cost Savings: %s%.2f/hr (%.1f%%)
 
 Provide a concise explanation (2-3 sentences) focusing on:
 1. Why this change is beneficial
@@ -406,17 +422,18 @@ Respond with JSON:
 }`, rec.NodePoolName, rec.CurrentNodes, rec.CurrentInstanceTypes,
 			rec.CurrentCPUCapacity, (rec.CurrentCPUUsed/rec.CurrentCPUCapacity)*100,
 			rec.CurrentMemoryCapacity, (rec.CurrentMemoryUsed/rec.CurrentMemoryCapacity)*100,
-			rec.CurrentCost, rec.CapacityType,
+			costCurrencySymbol(r.config.AWSRegion), rec.CurrentCost, rec.CapacityType,
 			rec.RecommendedNodes, rec.RecommendedInstanceTypes,
 			rec.RecommendedTotalCPU, rec.RecommendedTotalMemory,
-			rec.RecommendedCost, rec.CapacityType,
+			costCurrencySymbol(r.config.AWSRegion), rec.RecommendedCost, rec.CapacityType,
+			costCurrencySymbol(r.config.AWSRegion),
 			rec.CostSavings, rec.CostSavingsPercent)
 
 		// Use adaptive timeout based on parent context
 		// Remote LLM services (vLLM, LiteLLM) typically need more time than local Ollama
 		// Default to 2 minutes (120s) for LLM enhancement, but respect parent context deadline
 		timeout := 120 * time.Second
-		
+
 		// Check parent context deadline to avoid exceeding it
 		if deadline, ok := ctx.Deadline(); ok {
 			remaining := time.Until(deadline)
@@ -430,7 +447,7 @@ Respond with JSON:
 				timeout = 5 * time.Second
 			}
 		}
-		
+
 		ollamaCtx, cancel := context.WithTimeout(ctx, timeout)
 		response, err := r.llmClient.Chat(ollamaCtx, prompt)
 		cancel()
@@ -503,7 +520,11 @@ func (r *Recommender) findOptimalInstanceTypesWithCapacityType(ctx context.Conte
 				continue
 			}
 			nodesNeeded := int(math.Ceil(math.Max(targetCPU/cpu, targetMemory/mem)))
-			cost := r.estimateCost(ctx, []string{it}, capType, nodesNeeded)
+			priceResult, _ := r.estimateCostWithSource(ctx, []string{it}, capType, nodesNeeded)
+			if priceResult.Source == PricingSourceUnknown || priceResult.Cost <= 0 {
+				continue
+			}
+			cost := priceResult.Cost
 			if cost < bestCost {
 				bestCost = cost
 				bestTypes = []string{it}
@@ -531,7 +552,11 @@ func (r *Recommender) findOptimalInstanceTypesWithCapacityType(ctx context.Conte
 				}
 
 				nodesNeeded := int(math.Ceil(math.Max(targetCPU/avgCPU, targetMemory/avgMemory)))
-				cost := r.estimateCost(ctx, combo, capType, nodesNeeded)
+				priceResult, sources := r.estimateCostWithSource(ctx, combo, capType, nodesNeeded)
+				if priceResult.Source == PricingSourceUnknown || priceResult.Cost <= 0 || len(sources) != len(combo) {
+					continue
+				}
+				cost := priceResult.Cost
 				if cost < bestCost {
 					bestCost = cost
 					bestTypes = combo
@@ -547,6 +572,7 @@ func (r *Recommender) findOptimalInstanceTypesWithCapacityType(ctx context.Conte
 
 // findOptimalInstanceTypes finds the best instance type combination to match required capacity at lowest cost
 // Deprecated: Use findOptimalInstanceTypesWithCapacityType instead
+//
 //nolint:unused // Kept for backward compatibility
 func (r *Recommender) findOptimalInstanceTypes(requiredCPU, requiredMemory float64, architecture, capacityType string) ([]string, int, float64) {
 	types, nodes, cost, _ := r.findOptimalInstanceTypesWithCapacityType(context.Background(), requiredCPU, requiredMemory, architecture, capacityType == "spot", capacityType != "spot")
@@ -556,6 +582,7 @@ func (r *Recommender) findOptimalInstanceTypes(requiredCPU, requiredMemory float
 // getCandidateInstanceTypes returns candidate instance types based on architecture and requirements
 // Queries AWS Pricing API for available instance types instead of hardcoding
 func (r *Recommender) getCandidateInstanceTypes(architecture string, cpu, memory float64) []string {
+	isChinaRegion := r.config != nil && strings.HasPrefix(r.config.AWSRegion, "cn-")
 	// Try to get instance types from AWS Pricing API
 	if r.awsPricing != nil {
 		// Increase timeout to 60 seconds - querying many instance types can be slow
@@ -566,23 +593,57 @@ func (r *Recommender) getCandidateInstanceTypes(architecture string, cpu, memory
 		availableTypes, err := r.awsPricing.GetAvailableEC2InstanceTypes(ctx, architecture)
 		if err == nil && len(availableTypes) > 0 {
 			// Filter by CPU/Memory ratio and requirements
-			return r.filterInstanceTypesByRequirements(availableTypes, architecture, cpu, memory)
+			candidates := r.filterInstanceTypesByRequirements(availableTypes, architecture, cpu, memory)
+			if isChinaRegion {
+				candidates = filterUnavailableChinaInstanceTypes(candidates)
+			}
+			if len(candidates) > 0 {
+				return candidates
+			}
 		}
 		// If AWS API fails, fall back to hardcoded list
 		if err != nil {
 			// Only log if it's not a context timeout (which is expected on slow connections)
 			if !strings.Contains(err.Error(), "context deadline exceeded") && !strings.Contains(err.Error(), "timeout") {
-				log.Printf("Warning: Failed to get instance types from AWS API: %v. Using fallback list.", err)
+				if isChinaRegion {
+					log.Printf("Warning: Failed to get region-specific instance types from AWS API: %v. Using filtered hardcoded candidates for China.", err)
+				} else {
+					log.Printf("Warning: Failed to get instance types from AWS API: %v. Using fallback list.", err)
+				}
 			} else {
-				log.Printf("Info: AWS Pricing API timed out. Using fallback instance types list. Subsequent requests will use cached data.")
+				if isChinaRegion {
+					log.Printf("Info: AWS Pricing API timed out. Using filtered hardcoded candidates for China.")
+				} else {
+					log.Printf("Info: AWS Pricing API timed out. Using fallback instance types list. Subsequent requests will use cached data.")
+				}
 			}
 		} else if len(availableTypes) == 0 {
-			log.Printf("Warning: AWS API returned empty instance types list for architecture %s. Using fallback list.", architecture)
+			log.Printf("Warning: AWS API returned empty instance types list for architecture %s.", architecture)
 		}
+	}
+	if isChinaRegion {
+		return filterUnavailableChinaInstanceTypes(r.getHardcodedCandidateInstanceTypes(architecture, cpu, memory))
 	}
 
 	// Fallback to hardcoded list if AWS API is unavailable
 	return r.getHardcodedCandidateInstanceTypes(architecture, cpu, memory)
+}
+
+// filterUnavailableChinaInstanceTypes excludes families that the China EC2
+// DescribeInstanceTypeOfferings API reported unavailable in both cn-north-1
+// and cn-northwest-1 on 2026-10-19.
+func filterUnavailableChinaInstanceTypes(instanceTypes []string) []string {
+	unavailableFamilies := map[string]struct{}{
+		"m6a": {}, "c6a": {}, "r6a": {}, "x2gd": {}, "x8g": {},
+	}
+	filtered := make([]string, 0, len(instanceTypes))
+	for _, instanceType := range instanceTypes {
+		family, _, ok := strings.Cut(strings.ToLower(instanceType), ".")
+		if _, unavailable := unavailableFamilies[family]; !ok || !unavailable {
+			filtered = append(filtered, instanceType)
+		}
+	}
+	return filtered
 }
 
 // filterInstanceTypesByRequirements filters AWS instance types based on CPU/Memory requirements
@@ -625,32 +686,28 @@ func (r *Recommender) filterInstanceTypesByRequirements(availableTypes []string,
 		}
 	}
 
-	// Limit to reasonable number of candidates and sort by cost efficiency
+	// Sort by cost efficiency, placing candidates without a known regional
+	// price last so they cannot crowd valid types out of the bounded search.
+	sort.Slice(candidates, func(i, j int) bool {
+		costI, sourcesI := r.estimateCostWithSource(context.Background(), []string{candidates[i]}, "on-demand", 1)
+		costJ, sourcesJ := r.estimateCostWithSource(context.Background(), []string{candidates[j]}, "on-demand", 1)
+		knownI := costI.Source != PricingSourceUnknown && costI.Cost > 0 && len(sourcesI) == 1
+		knownJ := costJ.Source != PricingSourceUnknown && costJ.Cost > 0 && len(sourcesJ) == 1
+		if knownI != knownJ {
+			return knownI
+		}
+		cpuI, memI := r.estimateInstanceCapacity(candidates[i])
+		cpuJ, memJ := r.estimateInstanceCapacity(candidates[j])
+		efficiencyI := math.MaxFloat64
+		efficiencyJ := math.MaxFloat64
+		if knownI {
+			efficiencyI = costI.Cost / (cpuI*0.7 + memI*0.3)
+			efficiencyJ = costJ.Cost / (cpuJ*0.7 + memJ*0.3)
+		}
+		return efficiencyI < efficiencyJ
+	})
 	if len(candidates) > 20 {
-		// Sort by cost efficiency and take top 20
-		sort.Slice(candidates, func(i, j int) bool {
-			cpuI, memI := r.estimateInstanceCapacity(candidates[i])
-			cpuJ, memJ := r.estimateInstanceCapacity(candidates[j])
-			costI := r.estimateCost(context.Background(), []string{candidates[i]}, "on-demand", 1)
-			costJ := r.estimateCost(context.Background(), []string{candidates[j]}, "on-demand", 1)
-
-			efficiencyI := costI / (cpuI*0.7 + memI*0.3)
-			efficiencyJ := costJ / (cpuJ*0.7 + memJ*0.3)
-			return efficiencyI < efficiencyJ
-		})
 		candidates = candidates[:20]
-	} else {
-		// Sort by cost efficiency
-		sort.Slice(candidates, func(i, j int) bool {
-			cpuI, memI := r.estimateInstanceCapacity(candidates[i])
-			cpuJ, memJ := r.estimateInstanceCapacity(candidates[j])
-			costI := r.estimateCost(context.Background(), []string{candidates[i]}, "on-demand", 1)
-			costJ := r.estimateCost(context.Background(), []string{candidates[j]}, "on-demand", 1)
-
-			efficiencyI := costI / (cpuI*0.7 + memI*0.3)
-			efficiencyJ := costJ / (cpuJ*0.7 + memJ*0.3)
-			return efficiencyI < efficiencyJ
-		})
 	}
 
 	return candidates
@@ -678,13 +735,25 @@ func (r *Recommender) getHardcodedCandidateInstanceTypes(architecture string, cp
 		if memoryToCPURatio > 8 {
 			// Memory optimized
 			candidates = []string{"r6i.xlarge", "r6i.2xlarge", "r6i.4xlarge", "r6a.xlarge", "r6a.2xlarge", "r6a.4xlarge", "r8i.xlarge", "r8i.2xlarge"}
+			if isChinaRegion := r.config != nil && strings.HasPrefix(r.config.AWSRegion, "cn-"); isChinaRegion {
+				candidates = append(candidates, "r5a.xlarge", "r5a.2xlarge", "r5a.4xlarge", "r5a.8xlarge")
+			}
 		} else if cpu > 8 {
 			// CPU optimized
 			candidates = []string{"c6i.xlarge", "c6i.2xlarge", "c6i.4xlarge", "c6a.xlarge", "c6a.2xlarge", "c6a.4xlarge"}
+			if isChinaRegion := r.config != nil && strings.HasPrefix(r.config.AWSRegion, "cn-"); isChinaRegion {
+				candidates = append(candidates, "c5a.xlarge", "c5a.2xlarge", "c5a.4xlarge", "c5a.8xlarge")
+			}
 		} else {
 			// General purpose
 			candidates = []string{"m6i.xlarge", "m6i.2xlarge", "m6i.4xlarge", "m6i.8xlarge", "m6a.xlarge", "m6a.2xlarge", "m6a.4xlarge", "t3.xlarge", "t3.2xlarge"}
+			if isChinaRegion := r.config != nil && strings.HasPrefix(r.config.AWSRegion, "cn-"); isChinaRegion {
+				candidates = append(candidates, "m5a.xlarge", "m5a.2xlarge", "m5a.4xlarge", "m5a.8xlarge", "t3a.xlarge", "t3a.2xlarge")
+			}
 		}
+	}
+	if r.config != nil && strings.HasPrefix(r.config.AWSRegion, "cn-") {
+		candidates = filterUnavailableChinaInstanceTypes(candidates)
 	}
 
 	// Filter out invalid instance types and sort by cost efficiency
@@ -694,6 +763,16 @@ func (r *Recommender) getHardcodedCandidateInstanceTypes(architecture string, cp
 		if instCPU > 0 && instMem > 0 {
 			validCandidates = append(validCandidates, it)
 		}
+	}
+	if r.config != nil && strings.HasPrefix(r.config.AWSRegion, "cn-") {
+		pricedCandidates := validCandidates[:0]
+		for _, it := range validCandidates {
+			price, sources := r.estimateCostWithSource(context.Background(), []string{it}, "on-demand", 1)
+			if price.Cost > 0 && price.Source != PricingSourceUnknown && len(sources) == 1 {
+				pricedCandidates = append(pricedCandidates, it)
+			}
+		}
+		validCandidates = pricedCandidates
 	}
 
 	// Sort by cost efficiency (cost per unit of capacity)

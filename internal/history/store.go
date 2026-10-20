@@ -23,7 +23,9 @@ type Point struct {
 	GPUAllocated      float64 `json:"gpuAllocated"`
 	Nodes             int     `json:"nodes"`
 	Pods              int     `json:"pods"`
-	CostUSDPerHour    float64 `json:"costUSDPerHour"`
+	CostPerHour       float64 `json:"costPerHour"`
+	Currency          string  `json:"currency"`
+	CostUSDPerHour    float64 `json:"costUSDPerHour,omitempty"` // Deprecated: use CostPerHour with Currency.
 }
 
 // Store is a thread-safe append-only ring buffer of cluster samples.
