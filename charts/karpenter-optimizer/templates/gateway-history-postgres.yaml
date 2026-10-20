@@ -1,0 +1,29 @@
+{{- if .Values.database.enabled }}
+# Durable LiteLLM gateway cost history.
+# Requires the CloudNativePG operator to be installed in the cluster
+# (https://cloudnative-pg.io/documentation/installation/). The operator creates
+# the "<cluster>-<database>-credentials" secret that the deployment references.
+apiVersion: postgresql.cnpg.io/v1
+kind: PostgresCluster
+metadata:
+  name: {{ .Values.database.cluster.name }}
+  labels:
+    {{- include "karpenter-optimizer.labels" . | nindent 4 }}
+spec:
+  instances: 1
+  postgresql:
+    image: {{ .Values.database.cluster.postgresImage.repository }}:{{ .Values.database.cluster.postgresImage.tag }}
+  storage:
+    size: {{ .Values.database.cluster.storage.size }}
+    {{- with .Values.database.cluster.storage.storageClass }}
+    storageClass: {{ . }}
+    {{- end }}
+  {{- with .Values.database.cluster.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  bootstrap:
+    initdb:
+      database: {{ .Values.database.cluster.database }}
+      owner: {{ .Values.database.cluster.user }}
+{{- end }}

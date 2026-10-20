@@ -25,7 +25,7 @@ Karpenter Optimizer helps you optimize your Karpenter NodePool configurations by
 - 🔍 **Karpenter Log Analyzer**: Analyze Karpenter error logs with AI-powered explanations and actionable recommendations
 - 🎮 **GPU Allocation Visualization**: See GPU count, memory, and allocation per node, pod, and cluster (allocation-based, no DCGM/Prometheus). GPU count/memory read from node labels (`nvidia.com/gpu.count`, `nvidia.com/gpu.memory`); HAMi/KAI memory partitioning aware (`nvidia.com/gpumem` + `hami.io/vgpu-devices-allocated`) — when HAMi is detected, GPU usage is reported as **memory % in use** plus a **GPU pod** count (fractional-GPU friendly)
 - 🤖 **LLM Serving Health**: A "Serving" tab probes in-cluster vLLM/sglang pods to show inference health — model, KV cache %, running/waiting, TTFT (mean/p95), end-to-end latency (mean/p95), preemptions, token throughput, and request rate. Each card shows a one-glance status (OK/Busy/Slow/Under pressure) with fix hints, where the model runs (node, instance type, GPU model, and the specific GPU card UUID on HAMi/KAI clusters), a "Model usage" chart that ranks models by throughput, and collapsible per-metric trend sparklines (1h/6h/24h) with a "last issue seen" marker for historical traceability
-- 🚦 **LiteLLM AI-Gateway Health**: when LiteLLM proxy pods are detected, the Serving tab shows a **LiteLLM Gateway** card — fleet-wide in-flight requests, admission queue, 503 rejections, error rate, E2E p95, gateway **overhead** p95 (isolates gateway cost from model latency), requests/s, cumulative spend, and a breakdown table you can **split by App / API key / Team** (`metadata_trace_name` / `api_key_alias` / `team_alias`, default App) — per calling dimension: total tokens split input/output, requests, tokens/s, spend; the **Models** view shows per-model latency + spend with **expandable rows** revealing which apps/keys/teams use each model. Set `LITELLM_METRICS_API_KEY` if the proxy's `/metrics` requires auth (LiteLLM ≥ v1.85.0); a 401/403 shows an actionable hint instead of failing
+- 🚦 **LiteLLM AI-Gateway Health**: when LiteLLM proxy pods are detected, the Serving tab shows a **LiteLLM Gateway** card — fleet-wide in-flight requests, admission queue, 503 rejections, error rate, E2E p95, gateway **overhead** p95 (isolates gateway cost from model latency), requests/s, cumulative spend, and a breakdown table you can **split by App / API key / Team** (`metadata_trace_name` / `api_key_alias` / `team_alias`, default App) — per calling dimension: total tokens split input/output, requests, tokens/s, spend; the **Models** view shows per-model latency + spend with **expandable rows** revealing which apps/keys/teams use each model. A **Cost & tokens by day** chart tracks per-day spend and token usage over 7/14/30 days (following the selected split dimension, with a fleet-total overlay). Set `LITELLM_METRICS_API_KEY` if the proxy's `/metrics` requires auth (LiteLLM ≥ v1.85.0); a 401/403 shows an actionable hint instead of failing
 - 🏢 **On-Prem / No-Karpenter Mode**: Gracefully degrades when Karpenter is absent — cluster-wide stats, GPU view, and "n/a" costs instead of errors
 - ⚡ **Fleet Power Estimation**: A coarse estimated power draw per instance family (e.g. `p4d` ~3.3 kW, `p5` ~10.2 kW) shown as an "Est. Power" tile in the Cluster Overview (clearly an estimate, with node coverage)
 - 📦 **Helm Chart**: Production-ready Helm chart for easy Kubernetes deployment
@@ -115,6 +115,18 @@ helm install karpenter-optimizer karpenter-optimizer/karpenter-optimizer \
 
 See the [Helm chart documentation](charts/karpenter-optimizer/README.md) for detailed configuration options.
 
+To enable **durable LiteLLM gateway cost history** (per-day spend/tokens that survive restarts), set `database.enabled=true` — this provisions a small CloudNativePG (CNPG) `PostgresCluster`. The CNPG operator must already be installed in the cluster:
+
+```bash
+helm install karpenter-optimizer karpenter-optimizer/karpenter-optimizer \
+  --namespace karpenter-optimizer \
+  --create-namespace \
+  --set database.enabled=true \
+  --set database.cluster.retentionHours=720
+```
+
+Without it, cost history is kept in-memory and resets when the optimizer pod restarts.
+
 ### Using Docker
 
 ```bash
@@ -158,6 +170,8 @@ The API will be available at `http://localhost:8080` and the frontend at `http:/
 - `LLM_AWS_REGION`: AWS region for Bedrock, if different from the default AWS region (optional; the `bedrock` provider signs Converse API requests with the AWS default credential chain — e.g. IRSA on EKS — so it needs no URL or API key, just `bedrock:InvokeModel` permissions and `LLM_MODEL` set to a model or inference profile ID). The standard AWS SDK endpoint variables (`AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_BEDROCK_RUNTIME`) are honored for VPC endpoints or gateways; set `AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true` in hardened deployments to pin the SDK to the regional AWS endpoints.
 - `LLM_MAX_TOKENS`: response token cap for Bedrock requests (optional; unset = the model's default maximum) — set it to bound the worst-case cost per request
 - `LITELLM_METRICS_API_KEY`: Bearer token for the LiteLLM proxy `/metrics` endpoint (optional; required by LiteLLM ≥ v1.85.0). When the gateway's metrics endpoint answers 401/403, the Serving tab shows an actionable hint pointing at this variable
+- `GATEWAY_HISTORY_DSN`: Postgres DSN for durable LiteLLM gateway cost history (e.g. a CNPG cluster; optional). Empty = an in-memory history that resets on restart. Alternatively set `GATEWAY_HISTORY_DB_HOST` / `PORT` / `USER` / `NAME` + `GATEWAY_HISTORY_DB_PASSWORD` and the DSN is composed for you (the Helm chart uses this so the password comes from the CNPG credentials secret)
+- `GATEWAY_HISTORY_RETENTION_HOURS`: how long to keep gateway cost history (default: 720 = 30 days)
 
 **Pricing note:** Cost estimates use live AWS Pricing API results when available. Instance-type discovery filters AWS Pricing index entries to the configured region and uses AWS `processorArchitecture` metadata to distinguish ARM from x86 types. Dated fallback snapshots queried 2026-10-19 are available for selected `us-east-1` USD and China-region CNY instance types; they may become stale and should be refreshed periodically. Snapshots are only used when pricing cannot be queried, and not when the Pricing API explicitly returns no product. The US snapshot is not reused for other commercial regions. Spot pricing is an estimate based on a fixed discount from on-demand pricing, not a live Spot market quote.
 
@@ -254,6 +268,7 @@ make swagger
 - `GET /api/v1/serving` - Inference health for detected vLLM/sglang serving pods (model, KV cache %, running/waiting, TTFT, E2E latency, preemptions, throughput, request rate, node/GPU placement)
 - `GET /api/v1/serving/history?window=6h` - Per-pod serving metric trends (sampled every 60s, in-memory) + last time each pod was unhealthy
 - `GET /api/v1/serving/gateway` - LiteLLM AI-gateway health: fleet-wide in-flight/queue/503/error/latency (E2E + overhead p95)/spend + usage breakdowns split by **app / API key / team** (`metadata_trace_name` / `api_key_alias` / `team_alias`), each with per-model detail (tokens split input/output); `null` when no LiteLLM proxy is detected
+- `GET /api/v1/serving/gateway/history?split=app&window=14d` - Per-day LiteLLM gateway cost & token usage by split dimension (or fleet total); in-memory by default, durable CNPG Postgres when enabled
 - `GET /api/v1/disruptions` - Get node disruption information
 - `GET /api/v1/disruptions/recent` - Get recent node deletions
 

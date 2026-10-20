@@ -39,11 +39,13 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/karpenter-optimizer/internal/awspricing"
 	"github.com/karpenter-optimizer/internal/config"
+	"github.com/karpenter-optimizer/internal/gatewayhistory"
 	"github.com/karpenter-optimizer/internal/history"
 	"github.com/karpenter-optimizer/internal/kubernetes"
 	"github.com/karpenter-optimizer/internal/litellm"
@@ -65,13 +67,17 @@ func debugLog(debug bool, format string, args ...interface{}) {
 }
 
 type Server struct {
-	router              *gin.Engine
-	config              *config.Config
-	recommender         *recommender.Recommender
-	k8sClient           *kubernetes.Client
-	karpenterDetected   bool
-	historyStore        *history.Store
-	servingHistoryStore *servinghistory.Store
+	router                  *gin.Engine
+	config                  *config.Config
+	recommender             *recommender.Recommender
+	k8sClient               *kubernetes.Client
+	karpenterDetected       bool
+	historyStore            *history.Store
+	servingHistoryStore     *servinghistory.Store
+	gatewayHistoryStore     gatewayhistory.Store
+	gatewayHistoryStoreName string
+	lastGateway             map[string]gwCounter // last cumulative snapshot (for counter diffs)
+	gwMu                    sync.Mutex
 }
 
 func NewServer(cfg *config.Config) *Server {
@@ -135,14 +141,23 @@ func NewServer(cfg *config.Config) *Server {
 		}
 	}
 
+	// Initialize the gateway history store: durable Postgres when
+	// GATEWAY_HISTORY_DSN is set, in-memory otherwise. Never fatal.
+	gwStore, gwStoreName, gwErr := initGatewayHistoryStore(cfg)
+	if gwErr != nil {
+		debugLog(cfg.Debug, "gateway history: %v\n", gwErr)
+	}
+
 	server := &Server{
-		router:              r,
-		config:              cfg,
-		recommender:         rec,
-		k8sClient:           k8sClient,
-		karpenterDetected:   karpenterDetected,
-		historyStore:        history.New(historyWindowFromEnv()),
-		servingHistoryStore: servinghistory.New(historyWindowFromEnv()),
+		router:                  r,
+		config:                  cfg,
+		recommender:             rec,
+		k8sClient:               k8sClient,
+		karpenterDetected:       karpenterDetected,
+		historyStore:            history.New(historyWindowFromEnv()),
+		servingHistoryStore:     servinghistory.New(historyWindowFromEnv()),
+		gatewayHistoryStore:     gwStore,
+		gatewayHistoryStoreName: gwStoreName,
 	}
 
 	// Configure the process-wide LiteLLM gateway prober with the metrics
@@ -155,6 +170,7 @@ func NewServer(cfg *config.Config) *Server {
 	if k8sClient != nil {
 		server.startHistorySampler(context.Background())
 		server.startServingHistorySampler(context.Background())
+		server.startGatewayHistorySampler(context.Background())
 	}
 
 	return server
@@ -250,6 +266,7 @@ func (s *Server) setupRoutes() {
 		api.GET("/history", s.getHistory)
 		api.GET("/serving", s.getServing)
 		api.GET("/serving/gateway", s.getServingGateway)
+		api.GET("/serving/gateway/history", s.getServingGatewayHistory)
 		api.GET("/serving/history", s.getServingHistory)
 		api.GET("/recommendations/cluster-summary", s.getRecommendationsFromClusterSummary)
 		api.GET("/recommendations/cluster-summary/stream", s.getRecommendationsFromClusterSummarySSE)

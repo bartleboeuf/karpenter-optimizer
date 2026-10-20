@@ -87,6 +87,26 @@ spec:
             {{- end }}
             - name: AWS_REGION
               value: {{ .Values.config.aws.region | quote }}
+            {{- if .Values.database.enabled }}
+            # Durable LiteLLM gateway cost history (CNPG). The app composes the
+            # DSN from these parts; the password comes from the CNPG credentials
+            # secret (<cluster>-<database>-credentials).
+            - name: GATEWAY_HISTORY_DB_HOST
+              value: {{ .Values.database.cluster.name }}
+            - name: GATEWAY_HISTORY_DB_PORT
+              value: "5432"
+            - name: GATEWAY_HISTORY_DB_USER
+              value: {{ .Values.database.cluster.user | quote }}
+            - name: GATEWAY_HISTORY_DB_NAME
+              value: {{ .Values.database.cluster.database | quote }}
+            - name: GATEWAY_HISTORY_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.cluster.name }}-{{ .Values.database.cluster.database }}-credentials
+                  key: password
+            - name: GATEWAY_HISTORY_RETENTION_HOURS
+              value: {{ .Values.database.cluster.retentionHours | quote }}
+            {{- end }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
