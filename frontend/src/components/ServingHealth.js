@@ -6,7 +6,7 @@ import { Progress } from './ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from './ui/accordion';
 import { RefreshCw, Loader2, Server, Cpu, Clock, AlertTriangle, BarChart3, HelpCircle, History, ChevronDown, ChevronRight } from 'lucide-react';
-import { AreaChart, Area, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { Bar, Line, ComposedChart, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { cn, shortGpuUuid, formatGPUMem } from '../lib/utils';
 import Sparkline from './Sparkline';
 
@@ -917,18 +917,22 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
   );
 }
 
-// GATEWAY_HIST_COLORS is a stable palette for the cost/tokens history series
-// (the fleet total uses the first color; split values cycle through the rest).
+// GATEWAY_HIST_COLORS is a stable palette for the daily cost/tokens history
+// (split values cycle through it in sorted order).
 const GATEWAY_HIST_COLORS = [
   '#9333ea', '#f59e0b', '#10b981', '#3b82f6', '#ef4444', '#8b5cf6',
   '#14b8a6', '#f97316', '#6366f1', '#ec4899',
 ];
 
-// GatewayCostHistory renders per-day gateway spend and token usage as an area
-// chart, grouped by the current Split-by dimension (app/apikey/team) or the
-// fleet total. It is self-contained: it fetches
+// GatewayCostHistory renders the LiteLLM gateway's per-day spend and token
+// usage (UTC days, 00:00–23:59) as a historical dashboard: a stacked bar chart
+// (one bar per day, split by the active Split-by dimension) with an optional
+// fleet-total line, plus a per-day table (day / spend / tokens / top consumer).
+// It is self-contained: it fetches
 // /api/v1/serving/gateway/history?split=...&window=... and refreshes every
-// 60s (history is sampled server-side on the 60s interval).
+// 60s (the backend samples the gateway's cumulative counters on the 60s
+// interval and folds deltas into per-day totals in its store, so closed days
+// are read only from the store and today updates live).
 function GatewayCostHistory({ split = 'app' }) {
   const [windowDays, setWindowDays] = useState('14');
   const [metric, setMetric] = useState('spend'); // 'spend' | 'tokens'
@@ -956,29 +960,51 @@ function GatewayCostHistory({ split = 'app' }) {
     return () => clearInterval(interval);
   }, [fetchHistory]);
 
-  // Pivot per-day rows into a recharts-ready matrix keyed by (value) series.
-  // The fleet total is value "" (label "Fleet").
-  const series = useMemo(() => {
-    if (!data || !Array.isArray(data.days)) return { data: [], names: [] };
-    const days = data.days.map((d) => d.day);
-    // unique days, oldest first
-    const daySet = Array.from(new Set(days)).sort();
-    // map value -> day -> number
+  // Per-day rollup: one row per UTC day (00:00–23:59). `cell` holds both
+  // spend and tokens per split value (so the table can show both columns while
+  // the chart shows the selected metric), plus day totals and the top consumer
+  // by the active metric. The fleet total is value "" (label "Fleet").
+  const byDay = useMemo(() => {
+    if (!data || !Array.isArray(data.days)) return { rows: [], names: [] };
+    const perDay = {};
     const byVal = {};
     data.days.forEach((d) => {
       const v = d.value || 'Fleet';
-      if (!byVal[v]) byVal[v] = {};
-      byVal[v][d.day] = byVal[v][d.day] ? byVal[v][d.day] + d[metric] : d[metric];
+      if (!perDay[d.day]) perDay[d.day] = {};
+      if (!perDay[d.day][v]) perDay[d.day][v] = { spend: 0, tokens: 0 };
+      perDay[d.day][v].spend += d.spend;
+      perDay[d.day][v].tokens += d.tokens;
+      byVal[v] = true;
     });
     const names = Object.keys(byVal).sort();
-    const chart = daySet.map((day) => {
-      const row = { day };
+    const hasSplitValues = names.some((n) => n !== 'Fleet');
+    const rows = Object.keys(perDay).sort().map((day) => {
+      const cell = perDay[day];
+      let top = '—';
+      if (hasSplitValues && names.filter((n) => n !== 'Fleet').length > 1) {
+        top = names
+          .filter((n) => n !== 'Fleet')
+          .sort((a, b) => cell[b][metric] - cell[a][metric])[0];
+      }
+      const row = { day, top, today: day === new Date().toISOString().slice(0, 10) };
+      let sumSpend = 0;
+      let sumTokens = 0;
+      let sumMetric = 0;
       names.forEach((n) => {
-        row[n] = byVal[n][day] != null ? byVal[n][day] : null;
+        row[n] = cell[n] ? cell[n][metric] : 0;
+        if (n !== 'Fleet') {
+          sumSpend += cell[n].spend;
+          sumTokens += cell[n].tokens;
+          sumMetric += row[n];
+        }
       });
+      const fleet = cell['Fleet'];
+      row.spend = hasSplitValues ? sumSpend : fleet ? fleet.spend : 0;
+      row.tokens = hasSplitValues ? sumTokens : fleet ? fleet.tokens : 0;
+      row.total = hasSplitValues ? sumMetric : fleet ? fleet[metric] : 0;
       return row;
     });
-    return { data: chart, names };
+    return { rows, names };
   }, [data, metric]);
 
   const fmtValue = (v) =>
@@ -986,16 +1012,16 @@ function GatewayCostHistory({ split = 'app' }) {
   const fmtAxis = (v) =>
     metric === 'spend' ? (v >= 100 ? `$${Math.round(v)}` : `$${v.toFixed(0)}`) : formatTokens(v);
 
-  const totalSeries = showTotal ? ['Fleet'] : [];
-  const valueSeries = series.names.filter((n) => n !== 'Fleet');
-  const visible = [...totalSeries, ...valueSeries];
-
-  const hasData = series.data.length > 0 && visible.length > 0;
+  const colLabel = (SPLIT_DIMS.find((d) => d.key === split) || SPLIT_DIMS[0]).label;
+  const stackSeries = byDay.names;
+  const hasData = byDay.rows.length > 0;
 
   return (
     <div className="mt-3 rounded-md border border-purple-100 bg-white/50 p-2">
       <div className="mb-1 flex flex-wrap items-center gap-2">
-        <span className="text-[11px] font-semibold text-purple-700">Cost &amp; tokens by day</span>
+        <span className="text-[11px] font-semibold text-purple-700">
+          Usage by day <span className="font-normal text-muted-foreground">(UTC, 00:00–23:59)</span>
+        </span>
         <div className="ml-auto flex items-center gap-1">
           {(['spend', 'tokens'].map((m) => (
             <button
@@ -1017,9 +1043,9 @@ function GatewayCostHistory({ split = 'app' }) {
               'rounded px-2 py-0.5 text-[11px] font-medium transition-colors',
               showTotal ? 'bg-purple-600 text-white' : 'bg-white/60 text-muted-foreground hover:bg-white'
             )}
-            title="Toggle the fleet-total series"
+            title="Overlay the daily total as a line"
           >
-            Fleet
+            Total
           </button>
           <select
             value={windowDays}
@@ -1039,50 +1065,83 @@ function GatewayCostHistory({ split = 'app' }) {
       )}
 
       {hasData ? (
-        <div className="h-[180px] w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={series.data} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-              <defs>
-                {visible.map((n, i) => (
-                  <linearGradient key={n} id={`ghg-${metric}-${i}`} x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={GATEWAY_HIST_COLORS[i % GATEWAY_HIST_COLORS.length]} stopOpacity={0.35} />
-                    <stop offset="95%" stopColor={GATEWAY_HIST_COLORS[i % GATEWAY_HIST_COLORS.length]} stopOpacity={0} />
-                  </linearGradient>
-                ))}
-              </defs>
-              <XAxis
-                dataKey="day"
-                tick={{ fontSize: 10 }}
-                tickFormatter={(d) => d.slice(5)} // MM-DD
-                stroke="#a78bfa"
-              />
-              <YAxis tick={{ fontSize: 10 }} tickFormatter={fmtAxis} width={56} stroke="#a78bfa" />
-              <Tooltip
-                formatter={(v, name) => [fmtValue(v), name]}
-                labelFormatter={(d) => new Date(d).toLocaleDateString()}
-              />
-              <Legend wrapperStyle={{ fontSize: 10 }} />
-              {visible.map((n, i) => (
-                <Area
-                  key={n}
-                  type="monotone"
-                  dataKey={n}
-                  name={n}
-                  stroke={GATEWAY_HIST_COLORS[i % GATEWAY_HIST_COLORS.length]}
-                  fill={`url(#ghg-${metric}-${i})`}
-                  strokeWidth={n === 'Fleet' ? 2 : 1.25}
-                  dot={false}
-                  connectNulls
-                  isAnimationActive={false}
+        <>
+          <div className="h-[180px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={byDay.rows} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                <XAxis
+                  dataKey="day"
+                  tick={{ fontSize: 10 }}
+                  tickFormatter={(d) => d.slice(5)} // MM-DD
+                  stroke="#a78bfa"
                 />
-              ))}
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
+                <YAxis tick={{ fontSize: 10 }} tickFormatter={fmtAxis} width={56} stroke="#a78bfa" />
+                <Tooltip
+                  formatter={(v, name) => [fmtValue(v), name]}
+                  labelFormatter={(d) => (
+                    d === new Date().toISOString().slice(0, 10) ? `${d} (today, so far)` : d
+                  )}
+                />
+                <Legend wrapperStyle={{ fontSize: 10 }} />
+                {stackSeries.map((n) => (
+                  <Bar
+                    key={n}
+                    dataKey={n}
+                    name={n}
+                    stackId="day"
+                    fill={GATEWAY_HIST_COLORS[byDay.names.indexOf(n) % GATEWAY_HIST_COLORS.length]}
+                    isAnimationActive={false}
+                  />
+                ))}
+                {showTotal && (
+                  <Line
+                    type="monotone"
+                    dataKey="total"
+                    name="Total"
+                    stroke="#1f2937"
+                    strokeWidth={1.5}
+                    dot={false}
+                    isAnimationActive={false}
+                  />
+                )}
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div className="max-h-[160px] overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-muted-foreground border-b border-purple-200">
+                  <th className="py-1 pr-2">Day (UTC)</th>
+                  <th className="py-1 pr-2 text-right">Spend</th>
+                  <th className="py-1 pr-2 text-right">Tokens</th>
+                  <th className="py-1 text-right">Top {colLabel}</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono">
+                {byDay.rows.slice().reverse().map((r) => (
+                  <tr key={r.day} className="border-b border-purple-100/60 last:border-0">
+                    <td className="py-1 pr-2">
+                      {r.day}
+                      {r.today && (
+                        <span className="ml-1 rounded bg-purple-100 px-1 text-[10px] text-purple-700">
+                          today
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-1 pr-2 text-right">${r.spend.toFixed(2)}</td>
+                    <td className="py-1 pr-2 text-right" title={String(r.tokens)}>{formatTokens(r.tokens)}</td>
+                    <td className="py-1 text-right font-sans" title={r.top === '—' ? `single ${colLabel.toLowerCase()} or no split data` : `Highest ${metric} on ${r.day}`}>{r.top}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
       ) : (
         <p className="py-6 text-center text-[11px] text-muted-foreground">
           {data && data.store === 'memory'
-            ? 'no history yet — sampled every 60s; in-memory store starts empty and resets on restart'
+            ? 'no history yet — sampled every 60s; the in-memory store starts empty and resets on restart'
             : 'no history yet'}
         </p>
       )}
