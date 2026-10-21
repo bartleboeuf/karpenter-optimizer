@@ -939,6 +939,8 @@ function GatewayCostHistory({ split = 'app' }) {
   const [showTotal, setShowTotal] = useState(true);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [focus, setFocus] = useState(null); // series hovered (chart bar or legend)
+  const [pinned, setPinned] = useState(null); // series click-pinned in the legend
 
   const fetchHistory = useCallback(async () => {
     try {
@@ -1016,6 +1018,12 @@ function GatewayCostHistory({ split = 'app' }) {
   const stackSeries = byDay.names;
   const hasData = byDay.rows.length > 0;
 
+  // Active highlight series: hover wins, pinned series is the fallback.
+  const focusSeries = focus || pinned;
+  const dimOthers = Boolean(focusSeries);
+  const colorOf = (n) =>
+    GATEWAY_HIST_COLORS[byDay.names.indexOf(n) % GATEWAY_HIST_COLORS.length];
+
   return (
     <div className="mt-3 rounded-md border border-purple-100 bg-white/50 p-2">
       <div className="mb-1 flex flex-wrap items-center gap-2">
@@ -1068,7 +1076,10 @@ function GatewayCostHistory({ split = 'app' }) {
         <>
           <div className="h-[180px] w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={byDay.rows} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+              <ComposedChart
+                data={byDay.rows}
+                margin={{ top: 4, right: 8, bottom: 0, left: 0 }}
+              >
                 <XAxis
                   dataKey="day"
                   tick={{ fontSize: 10 }}
@@ -1082,17 +1093,41 @@ function GatewayCostHistory({ split = 'app' }) {
                     d === new Date().toISOString().slice(0, 10) ? `${d} (today, so far)` : d
                   )}
                 />
-                <Legend wrapperStyle={{ fontSize: 10 }} />
+                <Legend
+                  wrapperStyle={{ fontSize: 10, cursor: 'pointer' }}
+                  onClick={(e) => {
+                    const n = e && e.dataKey;
+                    if (!n) return;
+                    setFocus(null);
+                    setPinned((prev) => (prev === n ? null : n));
+                  }}
+                />
                 {stackSeries.map((n) => (
                   <Bar
                     key={n}
                     dataKey={n}
                     name={n}
                     stackId="day"
-                    fill={GATEWAY_HIST_COLORS[byDay.names.indexOf(n) % GATEWAY_HIST_COLORS.length]}
+                    fill={colorOf(n)}
+                    fillOpacity={dimOthers && n !== focusSeries ? 0.25 : 1}
                     isAnimationActive={false}
+                    mouseEnter={() => setFocus(n)}
+                    mouseLeave={() => setFocus(null)}
                   />
                 ))}
+                {/* Evolution curve for the highlighted series (all days). */}
+                {focusSeries && (
+                  <Line
+                    type="monotone"
+                    dataKey={focusSeries}
+                    name={`${focusSeries} trend`}
+                    stroke={colorOf(focusSeries)}
+                    strokeWidth={2}
+                    dot={{ r: 2 }}
+                    isAnimationActive={false}
+                    legendType="none"
+                  />
+                )}
                 {showTotal && (
                   <Line
                     type="monotone"
@@ -1107,6 +1142,11 @@ function GatewayCostHistory({ split = 'app' }) {
               </ComposedChart>
             </ResponsiveContainer>
           </div>
+          {dimOthers && (
+            <p className="mt-1 text-[10px] text-muted-foreground">
+              Highlighting <span className="font-semibold" style={{ color: colorOf(focusSeries) }}>{focusSeries}</span> across all days · click a legend chip to pin, click again to release
+            </p>
+          )}
 
           <div className="max-h-[160px] overflow-y-auto">
             <table className="w-full text-xs">
