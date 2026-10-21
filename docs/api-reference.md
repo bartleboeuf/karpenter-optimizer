@@ -420,11 +420,13 @@ Discovers in-cluster LiteLLM proxy pods (container image or command contains `li
 GET /api/v1/serving/gateway/history?split=app&window=14d
 ```
 
-Per-day LiteLLM gateway cost and token usage, grouped by a split dimension. A
-background sampler (same 60s interval as the cluster/serving trend samplers)
-diffs the gateway's cumulative spend/token counters each tick and folds the
-deltas into per-day totals, so a day's cost is the sum of the intervals sampled
-within it.
+Per-day LiteLLM gateway cost and token usage, grouped by a split dimension.
+Days are **UTC (00:00–23:59)**. A background sampler (same 60s interval as the
+cluster/serving trend samplers) diffs the gateway's cumulative spend/token
+counters each tick and folds the deltas into per-day totals — incremental
+rollups, no midnight job. Once a day passes its row is final and is only ever
+read from the store (the gateway is never re-queried for closed days); today
+updates live as intervals are sampled.
 
 - `split` — `total` | `app` | `apikey` | `team` (default `app`).
 - `window` — duration or day count, default `14d`, max `90d` (e.g. `7d`, `30d`).
@@ -452,9 +454,11 @@ within it.
 - `days[]` is ordered by day ascending, then value; `value` is the split
   dimension name (empty for `split=total`).
 - `store` is `postgres` or `memory` — the frontend hints accordingly when empty.
-- The Serving tab renders this as a **Cost & tokens by day** area chart in the
-  Gateway card, following the active Split-by control, with a
-  spend/tokens toggle, a fleet-total overlay, and a 7/14/30-day window selector.
+- The Serving tab renders this as the **Usage by day** dashboard in the
+  Gateway card: a stacked per-day bar chart (following the active Split-by
+  control, spend/tokens toggle, optional daily-total line) plus a per-day
+  table (day / spend / tokens / top consumer), with a 7/14/30-day window
+  selector.
 
 ### Analyze Workloads
 
