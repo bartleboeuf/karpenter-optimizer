@@ -962,49 +962,62 @@ function GatewayCostHistory({ split = 'app' }) {
 
   // Per-day rollup: one row per UTC day (00:00–23:59). `cell` holds both
   // spend and tokens per split value (so the table can show both columns while
-  // the chart shows the selected metric), plus day totals and the top consumer
-  // by the active metric. The fleet total is value "" (label "Fleet").
+  // the chart shows the selected metric). `names` is the union of values
+  // across ALL days in the window, so a value may be absent from any given
+  // day's cell — every cell access is guarded. The fleet total is value ""
+  // (label "Fleet") and only present for split=total.
   const byDay = useMemo(() => {
-    if (!data || !Array.isArray(data.days)) return { rows: [], names: [] };
-    const perDay = {};
-    const byVal = {};
-    data.days.forEach((d) => {
-      const v = d.value || 'Fleet';
-      if (!perDay[d.day]) perDay[d.day] = {};
-      if (!perDay[d.day][v]) perDay[d.day][v] = { spend: 0, tokens: 0 };
-      perDay[d.day][v].spend += d.spend;
-      perDay[d.day][v].tokens += d.tokens;
-      byVal[v] = true;
-    });
-    const names = Object.keys(byVal).sort();
-    const hasSplitValues = names.some((n) => n !== 'Fleet');
-    const rows = Object.keys(perDay).sort().map((day) => {
-      const cell = perDay[day];
-      let top = '—';
-      if (hasSplitValues && names.filter((n) => n !== 'Fleet').length > 1) {
-        top = names
-          .filter((n) => n !== 'Fleet')
-          .sort((a, b) => cell[b][metric] - cell[a][metric])[0];
-      }
-      const row = { day, top, today: day === new Date().toISOString().slice(0, 10) };
-      let sumSpend = 0;
-      let sumTokens = 0;
-      let sumMetric = 0;
-      names.forEach((n) => {
-        row[n] = cell[n] ? cell[n][metric] : 0;
-        if (n !== 'Fleet') {
-          sumSpend += cell[n].spend;
-          sumTokens += cell[n].tokens;
-          sumMetric += row[n];
-        }
+    try {
+      if (!data || !Array.isArray(data.days)) return { rows: [], names: [] };
+      const perDay = {};
+      const byVal = {};
+      data.days.forEach((d) => {
+        const v = d.value || 'Fleet';
+        if (!perDay[d.day]) perDay[d.day] = {};
+        if (!perDay[d.day][v]) perDay[d.day][v] = { spend: 0, tokens: 0 };
+        perDay[d.day][v].spend += d.spend;
+        perDay[d.day][v].tokens += d.tokens;
+        byVal[v] = true;
       });
-      const fleet = cell['Fleet'];
-      row.spend = hasSplitValues ? sumSpend : fleet ? fleet.spend : 0;
-      row.tokens = hasSplitValues ? sumTokens : fleet ? fleet.tokens : 0;
-      row.total = hasSplitValues ? sumMetric : fleet ? fleet[metric] : 0;
-      return row;
-    });
-    return { rows, names };
+      const names = Object.keys(byVal).sort();
+      const hasSplitValues = names.some((n) => n !== 'Fleet');
+      const rows = Object.keys(perDay).sort().map((day) => {
+        const cell = perDay[day];
+        let top = '—';
+        if (hasSplitValues && names.filter((n) => n !== 'Fleet').length > 1) {
+          // Only values that actually have activity on THIS day are candidates.
+          top =
+            names
+              .filter((n) => n !== 'Fleet')
+              .filter((n) => cell[n])
+              .sort((a, b) => cell[b][metric] - cell[a][metric])[0] || '—';
+        }
+        const row = { day, top, today: day === new Date().toISOString().slice(0, 10) };
+        let sumSpend = 0;
+        let sumTokens = 0;
+        let sumMetric = 0;
+        names.forEach((n) => {
+          const c = cell[n];
+          row[n] = c ? c[metric] : 0;
+          if (n !== 'Fleet' && c) {
+            sumSpend += c.spend;
+            sumTokens += c.tokens;
+            sumMetric += row[n];
+          }
+        });
+        const fleet = cell['Fleet'];
+        row.spend = hasSplitValues ? sumSpend : fleet ? fleet.spend : 0;
+        row.tokens = hasSplitValues ? sumTokens : fleet ? fleet.tokens : 0;
+        row.total = hasSplitValues ? sumMetric : fleet ? fleet[metric] : 0;
+        return row;
+      });
+      return { rows, names };
+    } catch (e) {
+      // A malformed history payload must degrade to "no chart", never crash
+      // the whole Serving tab.
+      console.error('gateway cost history: failed to build per-day rollup', e);
+      return { rows: [], names: [] };
+    }
   }, [data, metric]);
 
   const fmtValue = (v) =>
