@@ -6,7 +6,7 @@ import { Progress } from './ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from './ui/accordion';
 import { RefreshCw, Loader2, Server, Cpu, Clock, AlertTriangle, BarChart3, HelpCircle, History, ChevronDown, ChevronRight } from 'lucide-react';
-import { Bar, Line, ComposedChart, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { Area, Bar, Line, ComposedChart, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { cn, shortGpuUuid, formatGPUMem } from '../lib/utils';
 import Sparkline from './Sparkline';
 
@@ -917,12 +917,67 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
   );
 }
 
-// GATEWAY_HIST_COLORS is a stable palette for the daily cost/tokens history
-// (split values cycle through it in sorted order).
+// GATEWAY_HIST_COLORS is a minimal monochrome violet ramp for the daily
+// usage chart: one hue, ranked by usage across the window (index 0 =
+// biggest consumer = darkest). Keeping a single hue keeps the chart calm no
+// matter how many split values exist, and lets bar shade encode dominance
+// without a legend.
 const GATEWAY_HIST_COLORS = [
-  '#9333ea', '#f59e0b', '#10b981', '#3b82f6', '#ef4444', '#8b5cf6',
-  '#14b8a6', '#f97316', '#6366f1', '#ec4899',
+  '#4c1d95', '#6d28d9', '#7c3aed', '#8b5cf6', '#9f67f7',
+  '#a78bfa', '#b4a0fb', '#c4b5fd', '#d4c6fe', '#e3dcff',
 ];
+
+// Clamp a 0..1 t onto the violet ramp.
+function rampColor(t) {
+  const c = GATEWAY_HIST_COLORS;
+  const x = Math.min(0.9999, Math.max(0, t)) * (c.length - 1);
+  const i = Math.floor(x);
+  return c[i];
+}
+
+// Custom tooltip for the per-day usage chart: a card with the day header, the
+// hovered split value's contribution (value, % of day, % of window) and the
+// day total. Richer than the default tooltip without adding visual noise.
+function GatewayHistoryTooltip({ active, payload, label, focus, colorOf, fmtValue, windowSum }) {
+  if (!active || !payload || payload.length === 0) return null;
+  const row = payload[0].payload;
+  if (!row) return null;
+  const isToday = label === new Date().toISOString().slice(0, 10);
+  // Rows in the payload are in reverse render order; surface the focused
+  // series first, then the rest by size.
+  const items = payload
+    .filter((p) => p.value > 0)
+    .sort((a, b) => (b.value - a.value) || (a.dataKey < b.dataKey ? -1 : 1));
+  const first = focus || items[0];
+  const share = first && row.total > 0 ? (first.value / row.total) * 100 : null;
+  const windowShare = first && windowSum > 0 ? (first.value / windowSum) * 100 : null;
+  return (
+    <div className="rounded-lg border border-purple-200 bg-white/95 px-3 py-2 text-[11px] shadow-lg backdrop-blur">
+      <div className="mb-1 flex items-baseline gap-2 font-semibold text-gray-900">
+        <span className="font-mono">{label}</span>
+        {isToday && (
+          <span className="rounded bg-purple-100 px-1 text-[10px] font-medium text-purple-700">today, so far</span>
+        )}
+      </div>
+      {first && first.value > 0 && (
+        <div className="mb-1 flex items-center gap-1.5">
+          <span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: colorOf(first.dataKey) }} />
+          <span className="max-w-[160px] truncate font-medium" style={{ color: colorOf(first.dataKey) }}>{first.dataKey}</span>
+          <span className="ml-auto font-mono font-semibold text-gray-900">{fmtValue(first.value)}</span>
+        </div>
+      )}
+      {share != null && (
+        <div className="mb-1 font-mono text-[10px] text-muted-foreground">
+          {share.toFixed(1)}% of day{windowShare != null && windowShare > 0 ? ` · ${windowShare.toFixed(1)}% of window` : ''}
+        </div>
+      )}
+      <div className="flex items-center justify-between border-t border-purple-100 pt-1 text-[10px] text-muted-foreground">
+        <span>day total</span>
+        <span className="font-mono font-medium text-gray-700">{fmtValue(row.total)}</span>
+      </div>
+    </div>
+  );
+}
 
 // GatewayCostHistory renders the LiteLLM gateway's per-day spend and token
 // usage (UTC days, 00:00–23:59) as a historical dashboard: a stacked bar chart
@@ -1031,11 +1086,56 @@ function GatewayCostHistory({ split = 'app' }) {
   const stackSeries = byDay.names;
   const hasData = byDay.rows.length > 0;
 
+  // Series are colored on a single-hue ramp ranked by their window total
+  // (biggest consumer = darkest). The ranking is computed per active metric
+  // so the shading always matches what the bars show.
+  const seriesStats = useMemo(() => {
+    const per = {};
+    byDay.rows.forEach((r) => {
+      byDay.names.forEach((n) => {
+        const c = (per[n] || (per[n] = { sum: 0, days: 0 }));
+        const v = r[n];
+        if (v) {
+          c.sum += v;
+          c.days += 1;
+        }
+      });
+    });
+    const totals = byDay.names.map((n) => per[n] ? per[n].sum : 0);
+    const max = Math.max(1, ...totals);
+    const order = byDay.names
+      .slice()
+      .sort((a, b) => (per[b] ? per[b].sum : 0) - (per[a] ? per[a].sum : 0));
+    return { per, max, order, total: totals.reduce((a, b) => a + b, 0) };
+  }, [byDay]);
+
+  const colorOf = (n) => {
+    const rank = seriesStats.order.indexOf(n);
+    if (rank < 0) return GATEWAY_HIST_COLORS[0];
+    return rampColor(rank / Math.max(1, seriesStats.order.length - 1));
+  };
+
   // Active highlight series: hover wins, pinned series is the fallback.
   const focusSeries = focus || pinned;
   const dimOthers = Boolean(focusSeries);
-  const colorOf = (n) =>
-    GATEWAY_HIST_COLORS[byDay.names.indexOf(n) % GATEWAY_HIST_COLORS.length];
+
+  // Window-level stats for the highlighted series (stat strip + tooltip).
+  const focusStats = useMemo(() => {
+    if (!focusSeries) return null;
+    const per = seriesStats.per[focusSeries];
+    if (!per || per.sum <= 0) return null;
+    const days = byDay.rows.length || 1;
+    let today = 0;
+    const last = byDay.rows[byDay.rows.length - 1];
+    if (last) today = last[focusSeries] || 0;
+    return {
+      sum: per.sum,
+      days: per.days,
+      avg: per.sum / Math.max(1, per.days),
+      share: seriesStats.total > 0 ? (per.sum / seriesStats.total) * 100 : 0,
+      todayDelta: today - per.sum / days,
+    };
+  }, [focusSeries, byDay, seriesStats]);
 
   return (
     <div className="mt-3 rounded-md border border-purple-100 bg-white/50 p-2">
@@ -1101,20 +1201,22 @@ function GatewayCostHistory({ split = 'app' }) {
                 />
                 <YAxis tick={{ fontSize: 10 }} tickFormatter={fmtAxis} width={56} stroke="#a78bfa" />
                 <Tooltip
-                  formatter={(v, name) => [fmtValue(v), name]}
-                  labelFormatter={(d) => (
-                    d === new Date().toISOString().slice(0, 10) ? `${d} (today, so far)` : d
+                  content={<GatewayHistoryTooltip
+                    focus={focusSeries}
+                    colorOf={colorOf}
+                    fmtValue={fmtValue}
+                    windowSum={seriesStats.total}
+                  />}
+                  cursor={{ fill: 'rgba(124,58,237,0.06)' }}
+                />
+                <defs>
+                  {focusSeries && (
+                    <linearGradient id="gwFocusFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={colorOf(focusSeries)} stopOpacity={0.35} />
+                      <stop offset="100%" stopColor={colorOf(focusSeries)} stopOpacity={0.02} />
+                    </linearGradient>
                   )}
-                />
-                <Legend
-                  wrapperStyle={{ fontSize: 10, cursor: 'pointer' }}
-                  onClick={(e) => {
-                    const n = e && e.dataKey;
-                    if (!n) return;
-                    setFocus(null);
-                    setPinned((prev) => (prev === n ? null : n));
-                  }}
-                />
+                </defs>
                 {stackSeries.map((n) => (
                   <Bar
                     key={n}
@@ -1122,7 +1224,7 @@ function GatewayCostHistory({ split = 'app' }) {
                     name={n}
                     stackId="day"
                     fill={colorOf(n)}
-                    fillOpacity={dimOthers && n !== focusSeries ? 0.25 : 1}
+                    fillOpacity={dimOthers && n !== focusSeries ? 0.18 : 1}
                     isAnimationActive={false}
                     mouseEnter={() => setFocus(n)}
                     mouseLeave={() => setFocus(null)}
@@ -1130,16 +1232,28 @@ function GatewayCostHistory({ split = 'app' }) {
                 ))}
                 {/* Evolution curve for the highlighted series (all days). */}
                 {focusSeries && (
-                  <Line
-                    type="monotone"
-                    dataKey={focusSeries}
-                    name={`${focusSeries} trend`}
-                    stroke={colorOf(focusSeries)}
-                    strokeWidth={2}
-                    dot={{ r: 2 }}
-                    isAnimationActive={false}
-                    legendType="none"
-                  />
+                  <>
+                    <Area
+                      type="monotone"
+                      dataKey={focusSeries}
+                      stroke="none"
+                      fill="url(#gwFocusFill)"
+                      isAnimationActive={false}
+                      legendType="none"
+                      activeDot={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey={focusSeries}
+                      name={`${focusSeries} trend`}
+                      stroke={colorOf(focusSeries)}
+                      strokeWidth={2}
+                      dot={{ r: 2.5, strokeWidth: 0, fill: colorOf(focusSeries) }}
+                      activeDot={{ r: 4 }}
+                      isAnimationActive={false}
+                      legendType="none"
+                    />
+                  </>
                 )}
                 {showTotal && (
                   <Line
@@ -1155,9 +1269,78 @@ function GatewayCostHistory({ split = 'app' }) {
               </ComposedChart>
             </ResponsiveContainer>
           </div>
-          {dimOthers && (
-            <p className="mt-1 text-[10px] text-muted-foreground">
-              Highlighting <span className="font-semibold" style={{ color: colorOf(focusSeries) }}>{focusSeries}</span> across all days · click a legend chip to pin, click again to release
+
+          {/* Pill legend: click to pin, hover to preview; shade = usage rank. */}
+          {stackSeries.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {stackSeries.map((n) => {
+                const st = seriesStats.per[n];
+                const share = st && seriesStats.total > 0 ? (st.sum / seriesStats.total) * 100 : 0;
+                const active = focusSeries === n;
+                return (
+                  <button
+                    key={n}
+                    type="button"
+                    onMouseEnter={() => setFocus(n)}
+                    onMouseLeave={() => setFocus(null)}
+                    onClick={() => {
+                      setFocus(null);
+                      setPinned((prev) => (prev === n ? null : n));
+                    }}
+                    title={`${n} — ${fmtValue(st ? st.sum : 0)} over the window${pinned === n ? ' (pinned — click to release)' : ' (click to pin)'}`}
+                    className={cn(
+                      'flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium transition-all',
+                      active
+                        ? 'border-transparent shadow-sm ring-2 ring-purple-300'
+                        : 'border-purple-100 bg-white/70 hover:border-purple-300 hover:bg-white',
+                      dimOthers && !active && 'opacity-50'
+                    )}
+                    style={active ? { backgroundColor: colorOf(n) + '14' } : undefined}
+                  >
+                    <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: colorOf(n) }} />
+                    <span className={active ? 'text-gray-900' : 'text-muted-foreground'}>{n}</span>
+                    <span className="font-mono text-[9px] text-muted-foreground">{share.toFixed(0)}%</span>
+                    {pinned === n && (
+                      <span className="text-[9px] font-semibold text-purple-600">●</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Live stat strip for the highlighted series. */}
+          {focusSeries && focusStats && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 rounded-md border border-purple-100 bg-purple-50/60 px-2.5 py-1.5 text-[11px]">
+              <span className="flex items-center gap-1.5 font-semibold" style={{ color: colorOf(focusSeries) }}>
+                <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: colorOf(focusSeries) }} />
+                {focusSeries}
+              </span>
+              <span className="text-muted-foreground">
+                <span className="font-mono font-semibold text-gray-800">{fmtValue(focusStats.sum)}</span> over the window
+              </span>
+              <span className="text-muted-foreground">
+                <span className="font-mono font-semibold text-gray-800">{focusStats.share.toFixed(1)}%</span> share
+              </span>
+              <span className="text-muted-foreground">
+                <span className="font-mono font-semibold text-gray-800">{fmtValue(focusStats.avg)}/day</span> avg
+              </span>
+              <span className="ml-auto flex items-center gap-1 text-[10px] text-muted-foreground">
+                <span
+                  className={cn(
+                    'font-mono font-semibold',
+                    focusStats.todayDelta >= 0 ? 'text-emerald-600' : 'text-amber-600'
+                  )}
+                >
+                  {focusStats.todayDelta >= 0 ? '▲' : '▼'} {fmtValue(Math.abs(focusStats.todayDelta))}
+                </span>
+                today vs avg
+              </span>
+            </div>
+          )}
+          {!focusSeries && (
+            <p className="mt-1.5 text-[10px] text-muted-foreground/70">
+              Hover or click a chip to follow one {colLabel.toLowerCase()} across all days
             </p>
           )}
 
