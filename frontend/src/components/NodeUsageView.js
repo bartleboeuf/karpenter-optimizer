@@ -9,10 +9,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Switch } from './ui/switch';
 import { Separator } from './ui/separator';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
-import { ChevronDown, RefreshCw, Loader2, Package, Search, X, Regex } from 'lucide-react';
+import { ChevronDown, RefreshCw, Loader2, Package, Search, X, Regex, Server } from 'lucide-react';
 import { cn, formatGPUMem } from '../lib/utils';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { SkeletonRows } from './ui/skeleton';
+import { EmptyState } from './ui/empty-state';
 import { useCurrencyFormatter } from '../lib/currency';
 
 // Use runtime configuration from window.ENV (set via config.js) or build-time env var
@@ -420,6 +422,12 @@ function NodeUsageView() {
           <Alert variant="destructive" className="mb-4">
             <AlertTitle>Error</AlertTitle>
             <AlertDescription>{error}</AlertDescription>
+            <div className="mt-2">
+              <Button variant="outline" size="sm" onClick={fetchNodes}>
+                <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+                Retry
+              </Button>
+            </div>
           </Alert>
         )}
 
@@ -535,20 +543,29 @@ function NodeUsageView() {
         )}
 
         {loading && nodes.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8">
+          <div className="flex flex-col items-center justify-center py-12">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mb-2" />
             <p className="text-sm text-muted-foreground">Loading nodes...</p>
+            <SkeletonRows className="mt-6 w-full max-w-md" rows={4} />
           </div>
         ) : nodes.length === 0 ? (
-          <p className="text-center text-muted-foreground py-8">No nodes found</p>
+          <EmptyState
+            icon={Server}
+            title="No nodes found"
+            hint="Nodes appear here once Kubernetes reports them. Check that the cluster is reachable and that no node filters are active."
+            onRetry={error ? fetchNodes : undefined}
+          />
         ) : getFilteredNodeCount() === 0 ? (
-          <div className="text-center py-8">
-            <p className="text-muted-foreground mb-2">No nodes match the current filters</p>
-            <Button variant="outline" size="sm" onClick={clearFilters}>
+          <EmptyState
+            icon={Search}
+            title="No nodes match the current filters"
+            hint="Try widening the node name or pod filters, or switch the search mode."
+          >
+            <Button variant="outline" size="sm" className="mt-4" onClick={clearFilters}>
               <X className="h-4 w-4 mr-2" />
               Clear Filters
             </Button>
-          </div>
+          </EmptyState>
         ) : (
           <div className="space-y-6">
             {Object.entries(grouped).map(([groupName, groupNodes]) => {
@@ -599,7 +616,7 @@ function NodeUsageView() {
                         </CardHeader>
                         <CardContent>
                           <div className={cn("grid gap-4 mb-4", estimatedCost > 0 ? "grid-cols-3" : "grid-cols-2")}>
-                            <Card className="bg-white/95">
+                            <Card className="bg-card shadow-md">
                               <CardContent className="pt-6">
                                 <BarGauge
                                   label="Total CPU"
@@ -611,7 +628,7 @@ function NodeUsageView() {
                                 />
                               </CardContent>
                             </Card>
-                            <Card className="bg-white/95">
+                            <Card className="bg-card shadow-md">
                               <CardContent className="pt-6">
                                 <BarGauge
                                   label="Total Memory"
@@ -624,7 +641,7 @@ function NodeUsageView() {
                               </CardContent>
                             </Card>
                             {estimatedCost > 0 && (
-                              <Card className="bg-white/95">
+                              <Card className="bg-card shadow-md">
                                 <CardContent className="pt-6">
                                   <p className="text-sm text-muted-foreground mb-2">Estimated Cost</p>
                                   <p className="text-2xl font-bold text-green-600">

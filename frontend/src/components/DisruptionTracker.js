@@ -9,6 +9,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Switch } from './ui/switch';
 import { RefreshCw, AlertTriangle, AlertCircle, Loader2, Check, Package, Lightbulb, Clock } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { SkeletonRows } from './ui/skeleton';
+import { EmptyState } from './ui/empty-state';
 import { useCurrencyFormatter } from '../lib/currency';
 
 // Use runtime configuration from window.ENV (set via config.js) or build-time env var
@@ -147,7 +149,7 @@ function DisruptionCard({ disruption }) {
   return (
     <Card
       key={disruption.nodeName}
-      className={cn(isBlocked && 'bg-red-50 border-2 border-red-500')}
+      className={cn(isBlocked && 'bg-red-50 border-2 border-red-500 dark:bg-red-950/40 dark:border-red-500')}
     >
       <CardContent className="pt-6">
         <div className="space-y-4">
@@ -272,7 +274,7 @@ function DisruptionCard({ disruption }) {
                                     key={podIdx}
                                     value={pod}
                                     variant="outline"
-                                    className="bg-red-50 border-red-300"
+                                    className="bg-red-50 border-red-300 dark:bg-red-950/40 dark:border-red-500/50"
                                   />
                                 ))}
                               </div>
@@ -505,33 +507,49 @@ function DisruptionTracker() {
         {error && (
           <Alert variant="destructive" className="mb-4">
             <AlertTitle>{error}</AlertTitle>
+            <Button variant="outline" size="sm" className="mt-2" onClick={fetchDisruptions}>
+              <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+              Retry
+            </Button>
           </Alert>
         )}
 
         {loading && disruptions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8">
+          <div className="flex flex-col items-center justify-center py-12">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mb-2" />
             <p className="text-sm text-muted-foreground">Loading disruptions...</p>
+            <SkeletonRows className="mt-6 w-full max-w-md" rows={3} />
           </div>
         ) : disruptions.length === 0 ? (
-          <p className="text-center text-muted-foreground py-8">
-            {karpenterDetected === null
-              ? 'Loading...'
-              : karpenterDetected
-                ? 'No active disruptions found'
-                : 'No disruption tracking without Karpenter'}
-          </p>
+          <EmptyState
+            icon={AlertTriangle}
+            title={
+              karpenterDetected === null
+                ? 'Loading...'
+                : karpenterDetected
+                  ? 'No active disruptions found'
+                  : 'No disruption tracking without Karpenter'
+            }
+            hint={
+              karpenterDetected === null
+                ? 'Fetching disruption data.'
+                : karpenterDetected
+                  ? `No nodes are being drained or consolidated in the last ${windowHours}h.`
+                  : 'Install Karpenter to enable node disruption tracking.'
+            }
+            onRetry={karpenterDetected === null ? undefined : fetchDisruptions}
+          />
         ) : (
           <div className="space-y-4">
             {/* Cost still being incurred */}
             {summary && summary.totalCostPerHour > 0 && (
-              <div className="flex items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-4 py-3">
-                <AlertCircle className="h-5 w-5 text-amber-600 shrink-0" />
+              <div className="flex items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-500/40 dark:bg-amber-950/40">
+                <AlertCircle className="h-5 w-5 text-amber-600 shrink-0 dark:text-amber-400" />
                 <div className="text-sm">
-                  <span className="font-semibold text-amber-800">
+                  <span className="font-semibold text-amber-800 dark:text-amber-300">
                     {formatCost(summary.totalCostPerHour, currency)}/hr ({formatCost(summary.totalCostPerDay, currency)}/day)
                   </span>{' '}
-                  <span className="text-amber-800/80">
+                  <span className="text-amber-800/80 dark:text-amber-300/80">
                     still billed across {disruptions.length} disrupted node{disruptions.length !== 1 ? 's' : ''}
                     {summary.blockedCount > 0 && ` (${summary.blockedCount} blocked)`}
                   </span>

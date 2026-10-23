@@ -5,6 +5,8 @@ import { Button } from './ui/button';
 import { Alert, AlertDescription, AlertTitle } from './ui/alert';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Badge } from './ui/badge';
+import { Skeleton, SkeletonRows } from './ui/skeleton';
+import { EmptyState } from './ui/empty-state';
 import { Loader2, Sparkles, TrendingDown, Shield, Zap, Target } from 'lucide-react';
 import { cn } from '../lib/utils';
 import NodePoolCard from './NodePoolCard';
@@ -208,7 +210,18 @@ function AgentRecommendations({ onRecommendationsGenerated, onClusterCostUpdate 
           <Alert variant="destructive">
             <AlertTitle>Error</AlertTitle>
             <AlertDescription>{error}</AlertDescription>
+            <Button variant="outline" size="sm" className="mt-2" onClick={handleGenerateRecommendations}>
+              Retry
+            </Button>
           </Alert>
+        )}
+
+        {/* Loading skeleton while the agent analyzes */}
+        {loading && (
+          <div className="space-y-3 py-4">
+            <Skeleton className="h-5 w-40" />
+            <SkeletonRows rows={3} />
+          </div>
         )}
 
         {/* Plans Overview */}
@@ -316,22 +329,20 @@ function AgentRecommendations({ onRecommendationsGenerated, onClusterCostUpdate 
 
         {/* No Karpenter empty state */}
         {noKarpenter && (
-          <div className="text-center py-10 text-muted-foreground">
-            <Shield className="h-12 w-12 mx-auto mb-4 opacity-50" />
-            <p className="font-medium text-base">Recommendations require Karpenter NodePools</p>
-            <p className="mt-1 text-sm">
-              Karpenter is not installed in this cluster. Use the <strong>Overview</strong> tab
-              for cluster-wide analysis instead.
-            </p>
-          </div>
+          <EmptyState
+            icon={Shield}
+            title="Recommendations require Karpenter NodePools"
+            hint="Karpenter is not installed in this cluster. Use the Overview tab for cluster-wide analysis instead."
+          />
         )}
 
-        {/* Empty State */}
+        {/* Idle empty state */}
         {!loading && plans.length === 0 && !error && !noKarpenter && (
-          <div className="text-center py-8 text-muted-foreground">
-            <Sparkles className="h-12 w-12 mx-auto mb-4 opacity-50" />
-            <p>Select a strategy and click "Generate" to get AI-powered recommendations</p>
-          </div>
+          <EmptyState
+            icon={Sparkles}
+            title="Ready to optimize"
+            hint="Select an optimization strategy and click Generate to get AI-powered, NodePool-based recommendations."
+          />
         )}
       </CardContent>
     </Card>

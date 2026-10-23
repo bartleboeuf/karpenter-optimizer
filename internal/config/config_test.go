@@ -134,3 +134,31 @@ func TestResolveGatewayHistoryDSN(t *testing.T) {
 		assert.Equal(t, "postgres://db.local:5432", resolveGatewayHistoryDSN())
 	})
 }
+
+// TestResolveServingHistoryDSN covers the explicit-DSN short-circuit and the
+// reuse of the gateway history DSN when SERVING_HISTORY_DSN is unset.
+func TestResolveServingHistoryDSN(t *testing.T) {
+	t.Run("empty when nothing configured", func(t *testing.T) {
+		_ = os.Unsetenv("SERVING_HISTORY_DSN")
+		_ = os.Unsetenv("GATEWAY_HISTORY_DSN")
+		_ = os.Unsetenv("GATEWAY_HISTORY_DB_HOST")
+		assert.Empty(t, resolveServingHistoryDSN())
+	})
+
+	t.Run("explicit SERVING_HISTORY_DSN wins over gateway DSN", func(t *testing.T) {
+		_ = os.Setenv("SERVING_HISTORY_DSN", "postgres://u:p@sh:5432/sdb")
+		_ = os.Setenv("GATEWAY_HISTORY_DSN", "postgres://u:p@gw:5432/gdb")
+		defer func() {
+			_ = os.Unsetenv("SERVING_HISTORY_DSN")
+			_ = os.Unsetenv("GATEWAY_HISTORY_DSN")
+		}()
+		assert.Equal(t, "postgres://u:p@sh:5432/sdb", resolveServingHistoryDSN())
+	})
+
+	t.Run("reuses gateway DSN when SERVING_HISTORY_DSN unset", func(t *testing.T) {
+		_ = os.Unsetenv("SERVING_HISTORY_DSN")
+		_ = os.Setenv("GATEWAY_HISTORY_DSN", "postgres://u:p@gw:5432/gdb")
+		defer func() { _ = os.Unsetenv("GATEWAY_HISTORY_DSN") }()
+		assert.Equal(t, "postgres://u:p@gw:5432/gdb", resolveServingHistoryDSN())
+	})
+}

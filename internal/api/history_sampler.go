@@ -105,8 +105,10 @@ func (s *Server) sampleCluster() {
 	}
 
 	// Cluster cost (hourly). Reuses the recommender's cached pricing, so this
-	// is cheap once the AWS Pricing API results are cached.
+	// is cheap once the AWS Pricing API results are cached. Per-NodePool cost
+	// is accumulated in the same pass for the /metrics snapshot.
 	var costPerHour float64
+	poolCost := map[string]float64{}
 	if s.recommender != nil {
 		for _, n := range nodes {
 			if n.InstanceType == "" {
@@ -118,8 +120,16 @@ func (s *Server) sampleCluster() {
 			}
 			pricingResult, _ := s.recommender.EstimateCostWithSource(ctx, []string{n.InstanceType}, capacityType, 1)
 			costPerHour += pricingResult.Cost
+			poolName := n.NodePool
+			if poolName == "" {
+				poolName = "unmanaged"
+			}
+			poolCost[poolName] += pricingResult.Cost
 		}
 	}
+
+	// Publish the same data to the /metrics snapshot (no-op when disabled).
+	s.recordClusterMetrics(nodes, costPerHour, poolCost)
 
 	s.historyStore.Add(history.Point{
 		T:                 time.Now().Format(time.RFC3339),

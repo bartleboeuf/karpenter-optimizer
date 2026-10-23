@@ -37,12 +37,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/karpenter-optimizer/internal/alerts"
 	"github.com/karpenter-optimizer/internal/awspricing"
 	"github.com/karpenter-optimizer/internal/config"
 	"github.com/karpenter-optimizer/internal/gatewayhistory"
@@ -51,6 +55,7 @@ import (
 	"github.com/karpenter-optimizer/internal/litellm"
 	"github.com/karpenter-optimizer/internal/power"
 	"github.com/karpenter-optimizer/internal/recommender"
+	"github.com/karpenter-optimizer/internal/servingdurable"
 	"github.com/karpenter-optimizer/internal/servinghistory"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
@@ -74,10 +79,15 @@ type Server struct {
 	karpenterDetected       bool
 	historyStore            *history.Store
 	servingHistoryStore     *servinghistory.Store
+	servingDurableStore     servingdurable.Store
 	gatewayHistoryStore     gatewayhistory.Store
 	gatewayHistoryStoreName string
 	lastGateway             map[string]gwCounter // last cumulative snapshot (for counter diffs)
 	gwMu                    sync.Mutex
+	alertsManager           *alerts.Manager
+	metricsMu               sync.RWMutex
+	metricsSnap             *metricsSnapState
+	metricsHandler          http.Handler
 }
 
 func NewServer(cfg *config.Config) *Server {
@@ -148,6 +158,15 @@ func NewServer(cfg *config.Config) *Server {
 		debugLog(cfg.Debug, "gateway history: %v\n", gwErr)
 	}
 
+	// Durable serving history (raw per-pod samples, 7d retention) when a DSN
+	// is configured. The in-memory serving store keeps a matching window so
+	// the fast path can serve the full 7d while the durable store catches up.
+	servStore := initServingDurableStore(cfg)
+	servingWindow := historyWindowFromEnv()
+	if servStore != nil {
+		servingWindow = 7 * 24 * time.Hour
+	}
+
 	server := &Server{
 		router:                  r,
 		config:                  cfg,
@@ -155,15 +174,18 @@ func NewServer(cfg *config.Config) *Server {
 		k8sClient:               k8sClient,
 		karpenterDetected:       karpenterDetected,
 		historyStore:            history.New(historyWindowFromEnv()),
-		servingHistoryStore:     servinghistory.New(historyWindowFromEnv()),
+		servingHistoryStore:     servinghistory.New(servingWindow),
+		servingDurableStore:     servStore,
 		gatewayHistoryStore:     gwStore,
 		gatewayHistoryStoreName: gwStoreName,
+		alertsManager:           newAlertsManager(cfg),
 	}
 
 	// Configure the process-wide LiteLLM gateway prober with the metrics
 	// auth key (empty = unauthenticated).
 	litellmProber = litellm.NewProber(cfg.LiteLLMMetricsAPIKey)
 	server.setupRoutes()
+	server.initMetrics()
 
 	// Sample cluster usage and serving pod health into the history stores for
 	// trend sparklines. Both samplers run on the same interval.
@@ -171,9 +193,68 @@ func NewServer(cfg *config.Config) *Server {
 		server.startHistorySampler(context.Background())
 		server.startServingHistorySampler(context.Background())
 		server.startGatewayHistorySampler(context.Background())
+		server.startAlertsSampler(context.Background())
 	}
 
 	return server
+}
+
+// newAlertsManager constructs the alerts engine. It persists to the file named
+// by ALERTS_STATE_FILE (default /tmp/karpenter-optimizer-alerts.json) so
+// firing state survives a restart. On first run (no state file) it seeds the
+// config from the ALERTS_ENABLED / ALERTS_URLS env vars so the chart can wire
+// channels without the API. A later API PUT owns the config thereafter.
+func newAlertsManager(cfg *config.Config) *alerts.Manager {
+	stateFile := os.Getenv("ALERTS_STATE_FILE")
+	if stateFile == "" {
+		stateFile = "/tmp/karpenter-optimizer-alerts.json"
+	}
+	m := alerts.NewManager(stateFile)
+	if _, err := os.Stat(stateFile); err != nil && os.IsNotExist(err) {
+		if seed := alertsConfigFromEnv(); seed != nil {
+			if werr := m.UpdateConfig(*seed); werr != nil && cfg.Debug {
+				debugLog(true, "alerts: failed to seed env config: %v\n", werr)
+			}
+		}
+	}
+	if cfg.Debug {
+		debugLog(true, "alerts: state file %s\n", stateFile)
+	}
+	return m
+}
+
+// alertsConfigFromEnv builds an alerts config from ALERTS_ENABLED and
+// ALERTS_URLS. ALERTS_URLS is a comma-separated list of channels, each
+// "type=url" (type one of ntfy/discord/slack/webhook) or a bare URL (webhook).
+// Returns nil when nothing is set.
+func alertsConfigFromEnv() *alerts.Config {
+	enabled := os.Getenv("ALERTS_ENABLED")
+	urls := os.Getenv("ALERTS_URLS")
+	if enabled != "true" && enabled != "1" && urls == "" {
+		return nil
+	}
+	cfg := alerts.DefaultConfig()
+	cfg.Enabled = enabled == "true" || enabled == "1"
+	for _, part := range strings.Split(urls, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		ch := alerts.ChannelConfig{URL: part, Type: "webhook"}
+		if eq := strings.Index(part, "="); eq > 0 {
+			typeName := strings.ToLower(strings.TrimSpace(part[:eq]))
+			urlPart := strings.TrimSpace(part[eq+1:])
+			switch typeName {
+			case "ntfy", "discord", "slack", "webhook":
+				ch.Type = typeName
+				ch.URL = urlPart
+			}
+		}
+		if ch.URL != "" {
+			cfg.Channels = append(cfg.Channels, ch)
+		}
+	}
+	return &cfg
 }
 
 func (s *Server) setupRoutes() {
@@ -281,7 +362,76 @@ func (s *Server) setupRoutes() {
 		api.POST("/agent/outcomes", s.recordOptimizationOutcome)
 		api.GET("/agent/learning/stats", s.getLearningStats)
 		api.GET("/agent/learning/history", s.getOptimizationHistory)
+
+		// Alerting
+		api.GET("/alerts/config", s.getAlertsConfig)
+		api.PUT("/alerts/config", s.putAlertsConfig)
+		api.POST("/alerts/test", s.testAlerts)
 	}
+}
+
+// startAlertsSampler evaluates the alerting conditions on the history interval
+// and delivers any new transitions to the configured channels. It reuses data
+// the server already samples (see buildAlertSnapshot). No-op when disabled or
+// no k8s client.
+func (s *Server) startAlertsSampler(ctx context.Context) {
+	if s.k8sClient == nil || s.alertsManager == nil {
+		return
+	}
+	interval := historyIntervalFromEnv()
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.tickAlerts()
+			}
+		}
+	}()
+}
+
+// tickAlerts builds a snapshot, evaluates conditions, and persists state.
+func (s *Server) tickAlerts() {
+	if s.alertsManager == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Fetch disruptions once per tick; both the alert snapshot and the
+	// /metrics disruption gauges read this same list.
+	disruptions := s.fetchDisruptionsForTick(ctx)
+
+	snap := s.buildAlertSnapshot(ctx, disruptions)
+	transitions := s.alertsManager.Tick(ctx, snap)
+	if len(transitions) > 0 && s.config.Debug {
+		for _, tr := range transitions {
+			debugLog(true, "alerts: %s %q (%s)\n", tr.Status, tr.Title, tr.Severity)
+		}
+	}
+
+	// Disruption gauges for /metrics (no-op when the exporter is off).
+	if metricsEnabled() {
+		s.enrichDisruptionsWithCost(ctx, disruptions)
+		s.recordDisruptionMetrics(disruptions)
+	}
+}
+
+// fetchDisruptionsForTick returns the live disruption list, or nil when it
+// cannot be fetched (the tick proceeds without disruption data).
+func (s *Server) fetchDisruptionsForTick(ctx context.Context) []kubernetes.NodeDisruptionInfo {
+	if s.k8sClient == nil {
+		return nil
+	}
+	disruptions, err := s.k8sClient.GetNodeDisruptions(ctx, 24)
+	if err != nil {
+		debugLog(s.config.Debug, "alerts: failed to list disruptions: %v\n", err)
+		return nil
+	}
+	return disruptions
 }
 
 func (s *Server) Run(addr string) error {

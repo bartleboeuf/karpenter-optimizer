@@ -64,6 +64,7 @@ func (s *Server) sampleGateway() {
 		s.gwMu.Lock()
 		s.lastGateway = nil
 		s.gwMu.Unlock()
+		s.recordGatewayMetrics(nil) // clear the /metrics gateway section
 		return
 	}
 
@@ -72,6 +73,8 @@ func (s *Server) sampleGateway() {
 		refs = append(refs, litellm.PodRef{IP: p.IP, Port: p.Port})
 	}
 	h := litellmProber.ProbeAll(ctx, refs)
+	// Publish the same probe to the /metrics snapshot (no-op when disabled).
+	s.recordGatewayMetrics(&h)
 	snap := gatewaySnapshot(&h)
 
 	s.gwMu.Lock()
@@ -237,8 +240,8 @@ func (s *Server) getServingGatewayHistory(c *gin.Context) {
 }
 
 // parseGatewayHistoryWindow parses a gateway-history window (default 14d,
-// max 90d). Unlike parseHistoryWindow it accepts day-based durations for
-// multi-day cost trends.
+// max 90d). Unlike parseHistoryWindow it accepts day-based durations (e.g.
+// "7d") for multi-day cost trends.
 func parseGatewayHistoryWindow(raw string) time.Duration {
 	const def = 14 * 24 * time.Hour
 	const max = 90 * 24 * time.Hour
@@ -250,6 +253,16 @@ func parseGatewayHistoryWindow(raw string) time.Duration {
 			return max
 		}
 		return d
+	}
+	// Go's ParseDuration has no day unit; accept "Nd".
+	if len(raw) > 1 && (raw[len(raw)-1] == 'd' || raw[len(raw)-1] == 'D') {
+		if days, err := strconv.Atoi(raw[:len(raw)-1]); err == nil && days > 0 {
+			d := time.Duration(days) * 24 * time.Hour
+			if d > max {
+				return max
+			}
+			return d
+		}
 	}
 	if days, err := strconv.Atoi(raw); err == nil && days > 0 {
 		d := time.Duration(days) * 24 * time.Hour

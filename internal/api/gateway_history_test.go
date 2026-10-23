@@ -2,6 +2,7 @@ package api
 
 import (
 	"testing"
+	"time"
 
 	"github.com/karpenter-optimizer/internal/litellm"
 )
@@ -87,5 +88,27 @@ func TestDiffGatewayClampsReset(t *testing.T) {
 		if d.Spend < 0 || d.Tokens < 0 {
 			t.Fatalf("negative delta after reset: %+v", d)
 		}
+	}
+}
+
+func TestParseGatewayHistoryWindow(t *testing.T) {
+	assertDefault := 14 * 24 * time.Hour
+	if got := parseGatewayHistoryWindow(""); got != assertDefault {
+		t.Fatalf("empty: got %v, want %v", got, assertDefault)
+	}
+	if got := parseGatewayHistoryWindow("7d"); got != 7*24*time.Hour {
+		t.Fatalf("7d: got %v, want 168h", got)
+	}
+	if got := parseGatewayHistoryWindow("30d"); got != 30*24*time.Hour {
+		t.Fatalf("30d: got %v, want 720h", got)
+	}
+	if got := parseGatewayHistoryWindow("90d"); got != 90*24*time.Hour {
+		t.Fatalf("90d: got %v, want 2160h (cap)", got)
+	}
+	if got := parseGatewayHistoryWindow("200d"); got != 90*24*time.Hour {
+		t.Fatalf("200d: got %v, want 2160h (cap)", got)
+	}
+	if got := parseGatewayHistoryWindow("30"); got != 30*24*time.Hour {
+		t.Fatalf("30 (days): got %v, want 720h", got)
 	}
 }

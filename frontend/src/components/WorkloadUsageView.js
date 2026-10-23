@@ -8,10 +8,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Switch } from './ui/switch';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
-import { RefreshCw, Loader2, Search, X, ChevronLeft, ChevronRight, Columns } from 'lucide-react';
+import { RefreshCw, Loader2, Search, X, ChevronLeft, ChevronRight, Columns, Boxes } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Checkbox } from './ui/checkbox';
+import { SkeletonRows } from './ui/skeleton';
+import { EmptyState } from './ui/empty-state';
 
 const API_URL = (window.ENV && window.ENV.hasOwnProperty('REACT_APP_API_URL')) 
   ? window.ENV.REACT_APP_API_URL 
@@ -208,15 +210,15 @@ function WorkloadUsageView() {
   const getTypeColor = (type) => {
     switch (type) {
       case 'deployment':
-        return 'bg-blue-100 text-blue-800 border-blue-300';
+        return 'bg-blue-100 text-blue-800 border-blue-300 dark:bg-blue-500/20 dark:text-blue-300 dark:border-blue-500/40';
       case 'statefulset':
-        return 'bg-purple-100 text-purple-800 border-purple-300';
+        return 'bg-purple-100 text-purple-800 border-purple-300 dark:bg-purple-500/20 dark:text-purple-300 dark:border-purple-500/40';
       case 'daemonset':
-        return 'bg-green-100 text-green-800 border-green-300';
+        return 'bg-green-100 text-green-800 border-green-300 dark:bg-green-500/20 dark:text-green-300 dark:border-green-500/40';
       case 'job':
-        return 'bg-orange-100 text-orange-800 border-orange-300';
+        return 'bg-orange-100 text-orange-800 border-orange-300 dark:bg-orange-500/20 dark:text-orange-300 dark:border-orange-500/40';
       default:
-        return 'bg-gray-100 text-gray-800 border-gray-300';
+        return 'bg-muted text-foreground border-border';
     }
   };
 
@@ -379,6 +381,12 @@ function WorkloadUsageView() {
           <Alert variant="destructive" className="mb-4">
             <AlertTitle>Error</AlertTitle>
             <AlertDescription>{error}</AlertDescription>
+            <div className="mt-2">
+              <Button variant="outline" size="sm" onClick={fetchWorkloads}>
+                <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+                Retry
+              </Button>
+            </div>
           </Alert>
         )}
 
@@ -421,16 +429,25 @@ function WorkloadUsageView() {
         </div>
 
         {loading && workloads.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8">
+          <div className="flex flex-col items-center justify-center py-12">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mb-2" />
             <p className="text-sm text-muted-foreground">Loading workloads...</p>
+            <SkeletonRows className="mt-6 w-full max-w-md" rows={4} />
           </div>
         ) : workloads.length === 0 ? (
-          <p className="text-center text-muted-foreground py-8">No workloads found</p>
+          <EmptyState
+            icon={Boxes}
+            title="No workloads found"
+            hint="Deployments, StatefulSets, DaemonSets and Jobs appear here once they are scheduled in the cluster."
+            onRetry={error ? fetchWorkloads : undefined}
+          />
         ) : total === 0 ? (
-          <div className="text-center py-8">
-            <p className="text-muted-foreground mb-2">No workloads match the current filters</p>
-            <Button variant="outline" size="sm" onClick={() => {
+          <EmptyState
+            icon={Search}
+            title="No workloads match the current filters"
+            hint="Try clearing the type, namespace or name filters."
+          >
+            <Button variant="outline" size="sm" className="mt-4" onClick={() => {
               setTypeFilter('all');
               setNamespaceFilter('');
               setNameFilter('');
@@ -438,7 +455,7 @@ function WorkloadUsageView() {
               <X className="h-4 w-4 mr-2" />
               Clear Filters
             </Button>
-          </div>
+          </EmptyState>
         ) : (
           <>
             {/* Summary Statistics */}
@@ -447,11 +464,11 @@ function WorkloadUsageView() {
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 text-sm">
                   <div>
                     <span className="text-muted-foreground">Total CPU Used:</span>
-                    <span className="ml-2 font-semibold text-blue-600">{summary.totalCPUUsed.toFixed(2)} cores</span>
+                    <span className="ml-2 font-semibold text-primary">{summary.totalCPUUsed.toFixed(2)} cores</span>
                   </div>
                   <div>
                     <span className="text-muted-foreground">Total Memory Used:</span>
-                    <span className="ml-2 font-semibold text-blue-600">{summary.totalMemoryUsed.toFixed(2)} GiB</span>
+                    <span className="ml-2 font-semibold text-primary">{summary.totalMemoryUsed.toFixed(2)} GiB</span>
                   </div>
                   <div>
                     <span className="text-muted-foreground">Total Storage:</span>
@@ -540,7 +557,7 @@ function WorkloadUsageView() {
                         {visibleColumns.cpuUsed && (
                           <td className="p-2 text-right">
                             {cpuUsed > 0 ? (
-                              <span className="font-semibold text-blue-600">
+                              <span className="font-semibold text-primary">
                                 {cpuUsed.toFixed(2)} cores
                               </span>
                             ) : (
@@ -551,7 +568,7 @@ function WorkloadUsageView() {
                         {visibleColumns.memoryUsed && (
                           <td className="p-2 text-right">
                             {memoryUsed > 0 ? (
-                              <span className="font-semibold text-blue-600">
+                              <span className="font-semibold text-primary">
                                 {memoryUsed.toFixed(2)} GiB
                               </span>
                             ) : (

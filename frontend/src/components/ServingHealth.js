@@ -1,10 +1,14 @@
 import React, { useState, useEffect, useCallback, useMemo, Fragment } from 'react';
 import axios from 'axios';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from './ui/card';
+import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Progress } from './ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from './ui/accordion';
+import { Alert, AlertTitle } from './ui/alert';
+import { SkeletonRows } from './ui/skeleton';
+import { EmptyState } from './ui/empty-state';
 import { RefreshCw, Loader2, Server, Cpu, Clock, AlertTriangle, BarChart3, HelpCircle, History, ChevronDown, ChevronRight } from 'lucide-react';
 import { Area, Bar, Line, ComposedChart, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { cn, shortGpuUuid, formatGPUMem } from '../lib/utils';
@@ -162,10 +166,10 @@ function getServingStatus(pod, peers) {
 }
 
 const STATUS_TONE_CLASSES = {
-  green: 'bg-green-100 text-green-800 border-green-300',
-  amber: 'bg-amber-100 text-amber-800 border-amber-300',
-  orange: 'bg-orange-100 text-orange-800 border-orange-300',
-  red: 'bg-red-100 text-red-800 border-red-300',
+  green: 'bg-green-100 text-green-800 border-green-300 dark:bg-green-500/20 dark:text-green-300 dark:border-green-500/40',
+  amber: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/40',
+  orange: 'bg-orange-100 text-orange-800 border-orange-300 dark:bg-orange-500/20 dark:text-orange-300 dark:border-orange-500/40',
+  red: 'bg-red-100 text-red-800 border-red-300 dark:bg-red-500/20 dark:text-red-300 dark:border-red-500/40',
 };
 
 // --- Historical trends (sparklines + "last issue seen") ---
@@ -690,7 +694,7 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
       <div
         className={cn(
           'mb-4 rounded-md border px-3 py-2 text-xs flex items-start gap-2',
-          isAuth ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-red-200 bg-red-50 text-red-700'
+          isAuth ? 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-500/40 dark:bg-amber-950/40 dark:text-amber-300' : 'border-red-200 bg-red-50 text-red-700 dark:border-red-500/40 dark:bg-red-950/40 dark:text-red-300'
         )}
       >
         <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
@@ -723,7 +727,7 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
   const colLabel = dim.label;
 
   return (
-    <div className="mb-4 rounded-md border border-purple-200 bg-purple-50/40 p-3">
+    <div className="mb-4 rounded-md border border-purple-500/30 bg-purple-500/10 p-3">
       <div className="mb-2 flex items-center gap-2">
         <Server className="h-4 w-4 text-purple-600" />
         <span className="text-sm font-semibold text-purple-800">LiteLLM Gateway</span>
@@ -737,7 +741,7 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
 
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 mb-3">
         {tiles.map((t) => (
-          <div key={t.label} className="rounded-md bg-white/70 border border-purple-100 py-2 text-center">
+          <div key={t.label} className="rounded-md bg-muted/40 border border-purple-500/20 py-2 text-center">
             <p className="text-[11px] text-muted-foreground flex items-center justify-center gap-1">
               <span className="cursor-help border-b border-dotted border-muted-foreground/40" title={t.tip}>{t.label}</span>
             </p>
@@ -759,7 +763,7 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
                     'rounded px-2 py-0.5 text-[11px] font-medium capitalize transition-colors',
                     view === v
                       ? 'bg-purple-600 text-white'
-                      : 'bg-white/60 text-muted-foreground hover:bg-white'
+                      : 'bg-muted/40 text-muted-foreground hover:bg-accent'
                   )}
                 >
                   {v}
@@ -777,7 +781,7 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
                     'rounded px-2 py-0.5 text-[11px] font-medium transition-colors',
                     split === d.key
                       ? 'bg-purple-600 text-white'
-                      : 'bg-white/60 text-muted-foreground hover:bg-white'
+                      : 'bg-muted/40 text-muted-foreground hover:bg-accent'
                   )}
                 >
                   {d.label}
@@ -791,7 +795,7 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
-                    <tr className="text-left text-muted-foreground border-b border-purple-200">
+                    <tr className="text-left text-muted-foreground border-b border-purple-500/30">
                       <th className="py-1 pr-1 w-4" aria-label="expand" />
                       <th className="py-1 pr-2">Model</th>
                       <th className="py-1 pr-2 text-right">Req/s</th>
@@ -810,7 +814,7 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
                       return (
                         <Fragment key={m.model}>
                           <tr
-                            className="border-b border-purple-100/60 last:border-0 hover:bg-purple-50/40"
+                            className="border-b border-purple-500/20 last:border-0 hover:bg-purple-500/10"
                           >
                             <td className="py-1 pr-1">
                               {detailRows.length > 0 ? (
@@ -818,7 +822,7 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
                                   type="button"
                                   onClick={() => toggleModel(m.model)}
                                   aria-label={expanded ? `Collapse per-${colLabel.toLowerCase()} breakdown` : `Expand per-${colLabel.toLowerCase()} breakdown`}
-                                  className="inline-flex items-center justify-center rounded p-0.5 text-muted-foreground hover:text-purple-700 hover:bg-purple-100"
+                                  className="inline-flex items-center justify-center rounded p-0.5 text-muted-foreground hover:text-purple-500 hover:bg-purple-500/10"
                                 >
                                   {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                                 </button>
@@ -838,7 +842,7 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
                             <td className="py-1 text-right">{m.spend != null ? `$${m.spend.toFixed(2)}` : '—'}</td>
                           </tr>
                           {expanded && detailRows.length > 0 && (
-                            <tr className="border-b border-purple-100/60 last:border-0 bg-purple-50/30">
+                            <tr className="border-b border-purple-500/20 last:border-0 bg-purple-500/10">
                               <td />
                               <td colSpan={8} className="px-2 py-2">
                                 <p className="mb-1 font-sans text-[11px] font-medium text-muted-foreground">
@@ -846,7 +850,7 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
                                 </p>
                                 <table className="w-full text-xs">
                                   <thead>
-                                    <tr className="text-left text-muted-foreground border-b border-purple-200/70">
+                                    <tr className="text-left text-muted-foreground border-b border-purple-500/30">
                                       <th className="py-0.5 pr-2" title={`Grouped by ${colLabel.toLowerCase()}`}>{colLabel}</th>
                                       <th className="py-0.5 pr-2 text-right" title="Cumulative total tokens">Tokens</th>
                                       <th className="py-0.5 pr-2 text-right" title="Cumulative input (prompt) tokens">In</th>
@@ -856,7 +860,7 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
                                   </thead>
                                   <tbody className="font-mono">
                                     {detailRows.map((a) => (
-                                      <tr key={a.name} className="border-b border-purple-100/50 last:border-0">
+                                      <tr key={a.name} className="border-b border-purple-500/20 last:border-0">
                                         <td className="py-0.5 pr-2 font-sans font-medium" title={a.name}>{a.name}</td>
                                         <td className="py-0.5 pr-2 text-right" title={String(a.tokensTotal ?? '')}>{formatTokens(a.tokensTotal)}</td>
                                         <td className="py-0.5 pr-2 text-right" title={String(a.tokensInput ?? '')}>{formatTokens(a.tokensInput)}</td>
@@ -881,7 +885,7 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
-                    <tr className="text-left text-muted-foreground border-b border-purple-200">
+                    <tr className="text-left text-muted-foreground border-b border-purple-500/30">
                       <th className="py-1 pr-2" title={`Grouped by ${colLabel.toLowerCase()}; values without one are grouped as (unattributed)`}>{colLabel}</th>
                       <th className="py-1 pr-2 text-right">Req total</th>
                       <th className="py-1 pr-2 text-right" title="Token throughput, derived from counter diffs">Tokens/s</th>
@@ -893,7 +897,7 @@ function GatewayCard({ gateway, view = 'apps', onViewChange, split = 'app', onSp
                   </thead>
                   <tbody className="font-mono">
                     {topRows.map((a) => (
-                      <tr key={a.name} className="border-b border-purple-100/60 last:border-0">
+                      <tr key={a.name} className="border-b border-purple-500/20 last:border-0">
                         <td className="py-1 pr-2 font-sans font-medium" title={a.name}>{a.name}</td>
                         <td className="py-1 pr-2 text-right">{a.requestsTotal}</td>
                         <td className="py-1 pr-2 text-right">{a.tokensPerSec != null ? a.tokensPerSec.toFixed(1) : '—'}</td>
@@ -952,18 +956,18 @@ function GatewayHistoryTooltip({ active, payload, label, focus, colorOf, fmtValu
   const share = first && row.total > 0 ? (first.value / row.total) * 100 : null;
   const windowShare = first && windowSum > 0 ? (first.value / windowSum) * 100 : null;
   return (
-    <div className="rounded-lg border border-purple-200 bg-white/95 px-3 py-2 text-[11px] shadow-lg backdrop-blur">
-      <div className="mb-1 flex items-baseline gap-2 font-semibold text-gray-900">
+    <div className="rounded-lg border border-purple-500/30 bg-card px-3 py-2 text-[11px] shadow-lg backdrop-blur">
+      <div className="mb-1 flex items-baseline gap-2 font-semibold text-foreground">
         <span className="font-mono">{label}</span>
         {isToday && (
-          <span className="rounded bg-purple-100 px-1 text-[10px] font-medium text-purple-700">today, so far</span>
+          <span className="rounded bg-purple-100 px-1 text-[10px] font-medium text-purple-700 dark:bg-purple-500/25 dark:text-purple-300">today, so far</span>
         )}
       </div>
       {first && first.value > 0 && (
         <div className="mb-1 flex items-center gap-1.5">
           <span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: colorOf(first.dataKey) }} />
           <span className="max-w-[160px] truncate font-medium" style={{ color: colorOf(first.dataKey) }}>{first.dataKey}</span>
-          <span className="ml-auto font-mono font-semibold text-gray-900">{fmtValue(first.value)}</span>
+          <span className="ml-auto font-mono font-semibold text-foreground">{fmtValue(first.value)}</span>
         </div>
       )}
       {share != null && (
@@ -971,9 +975,9 @@ function GatewayHistoryTooltip({ active, payload, label, focus, colorOf, fmtValu
           {share.toFixed(1)}% of day{windowShare != null && windowShare > 0 ? ` · ${windowShare.toFixed(1)}% of window` : ''}
         </div>
       )}
-      <div className="flex items-center justify-between border-t border-purple-100 pt-1 text-[10px] text-muted-foreground">
+      <div className="flex items-center justify-between border-t border-purple-500/20 pt-1 text-[10px] text-muted-foreground">
         <span>day total</span>
-        <span className="font-mono font-medium text-gray-700">{fmtValue(row.total)}</span>
+        <span className="font-mono font-medium text-foreground/80">{fmtValue(row.total)}</span>
       </div>
     </div>
   );
@@ -1138,7 +1142,7 @@ function GatewayCostHistory({ split = 'app' }) {
   }, [focusSeries, byDay, seriesStats]);
 
   return (
-    <div className="mt-3 rounded-md border border-purple-100 bg-white/50 p-2">
+    <div className="mt-3 rounded-md border border-purple-500/20 bg-card p-2">
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <span className="text-[11px] font-semibold text-purple-700">
           Usage by day <span className="font-normal text-muted-foreground">(UTC, 00:00–23:59)</span>
@@ -1151,7 +1155,7 @@ function GatewayCostHistory({ split = 'app' }) {
               onClick={() => setMetric(m)}
               className={cn(
                 'rounded px-2 py-0.5 text-[11px] font-medium capitalize transition-colors',
-                metric === m ? 'bg-purple-600 text-white' : 'bg-white/60 text-muted-foreground hover:bg-white'
+                metric === m ? 'bg-purple-600 text-white' : 'bg-muted/40 text-muted-foreground hover:bg-accent'
               )}
             >
               {m}
@@ -1162,7 +1166,7 @@ function GatewayCostHistory({ split = 'app' }) {
             onClick={() => setShowTotal((s) => !s)}
             className={cn(
               'rounded px-2 py-0.5 text-[11px] font-medium transition-colors',
-              showTotal ? 'bg-purple-600 text-white' : 'bg-white/60 text-muted-foreground hover:bg-white'
+              showTotal ? 'bg-purple-600 text-white' : 'bg-muted/40 text-muted-foreground hover:bg-accent'
             )}
             title="Overlay the daily total as a line"
           >
@@ -1171,7 +1175,7 @@ function GatewayCostHistory({ split = 'app' }) {
           <select
             value={windowDays}
             onChange={(e) => setWindowDays(e.target.value)}
-            className="rounded border border-purple-200 bg-white/70 px-1.5 py-0.5 text-[11px] text-muted-foreground"
+            className="rounded border border-purple-500/30 bg-muted/40 px-1.5 py-0.5 text-[11px] text-muted-foreground"
             title="History window"
           >
             {['7', '14', '30'].map((w) => (
@@ -1292,13 +1296,13 @@ function GatewayCostHistory({ split = 'app' }) {
                       'flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium transition-all',
                       active
                         ? 'border-transparent shadow-sm ring-2 ring-purple-300'
-                        : 'border-purple-100 bg-white/70 hover:border-purple-300 hover:bg-white',
+                        : 'border-purple-500/20 bg-muted/40 hover:border-purple-500/50 hover:bg-accent',
                       dimOthers && !active && 'opacity-50'
                     )}
                     style={active ? { backgroundColor: colorOf(n) + '14' } : undefined}
                   >
                     <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: colorOf(n) }} />
-                    <span className={active ? 'text-gray-900' : 'text-muted-foreground'}>{n}</span>
+                    <span className={active ? 'text-foreground' : 'text-muted-foreground'}>{n}</span>
                     <span className="font-mono text-[9px] text-muted-foreground">{share.toFixed(0)}%</span>
                     {pinned === n && (
                       <span className="text-[9px] font-semibold text-purple-600">●</span>
@@ -1311,19 +1315,19 @@ function GatewayCostHistory({ split = 'app' }) {
 
           {/* Live stat strip for the highlighted series. */}
           {focusSeries && focusStats && (
-            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 rounded-md border border-purple-100 bg-purple-50/60 px-2.5 py-1.5 text-[11px]">
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 rounded-md border border-purple-500/20 bg-purple-500/10 px-2.5 py-1.5 text-[11px]">
               <span className="flex items-center gap-1.5 font-semibold" style={{ color: colorOf(focusSeries) }}>
                 <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: colorOf(focusSeries) }} />
                 {focusSeries}
               </span>
               <span className="text-muted-foreground">
-                <span className="font-mono font-semibold text-gray-800">{fmtValue(focusStats.sum)}</span> over the window
+                <span className="font-mono font-semibold text-foreground">{fmtValue(focusStats.sum)}</span> over the window
               </span>
               <span className="text-muted-foreground">
-                <span className="font-mono font-semibold text-gray-800">{focusStats.share.toFixed(1)}%</span> share
+                <span className="font-mono font-semibold text-foreground">{focusStats.share.toFixed(1)}%</span> share
               </span>
               <span className="text-muted-foreground">
-                <span className="font-mono font-semibold text-gray-800">{fmtValue(focusStats.avg)}/day</span> avg
+                <span className="font-mono font-semibold text-foreground">{fmtValue(focusStats.avg)}/day</span> avg
               </span>
               <span className="ml-auto flex items-center gap-1 text-[10px] text-muted-foreground">
                 <span
@@ -1347,7 +1351,7 @@ function GatewayCostHistory({ split = 'app' }) {
           <div className="max-h-[160px] overflow-y-auto">
             <table className="w-full text-xs">
               <thead>
-                <tr className="text-left text-muted-foreground border-b border-purple-200">
+                <tr className="text-left text-muted-foreground border-b border-purple-500/30">
                   <th className="py-1 pr-2">Day (UTC)</th>
                   <th className="py-1 pr-2 text-right">Spend</th>
                   <th className="py-1 pr-2 text-right">Tokens</th>
@@ -1356,11 +1360,11 @@ function GatewayCostHistory({ split = 'app' }) {
               </thead>
               <tbody className="font-mono">
                 {byDay.rows.slice().reverse().map((r) => (
-                  <tr key={r.day} className="border-b border-purple-100/60 last:border-0">
+                  <tr key={r.day} className="border-b border-purple-500/20 last:border-0">
                     <td className="py-1 pr-2">
                       {r.day}
                       {r.today && (
-                        <span className="ml-1 rounded bg-purple-100 px-1 text-[10px] text-purple-700">
+                        <span className="ml-1 rounded bg-purple-500/15 px-1 text-[10px] text-purple-500">
                           today
                         </span>
                       )}
@@ -1501,6 +1505,7 @@ function ServingHealth() {
                 <SelectItem value="1h">Trends: 1h</SelectItem>
                 <SelectItem value="6h">Trends: 6h</SelectItem>
                 <SelectItem value="24h">Trends: 24h</SelectItem>
+                <SelectItem value="7d">Trends: 7d</SelectItem>
               </SelectContent>
             </Select>
             <Select value={sortBy} onValueChange={setSortBy}>
@@ -1518,7 +1523,7 @@ function ServingHealth() {
               type="button"
               onClick={fetchServing}
               disabled={loading}
-              className="rounded-md border p-1.5 hover:bg-gray-100"
+              className="rounded-md border p-1.5 hover:bg-muted"
               aria-label="Refresh"
             >
               <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
@@ -1528,22 +1533,31 @@ function ServingHealth() {
       </CardHeader>
       <CardContent>
         {error ? (
-          <p className="text-sm text-red-600 flex items-center gap-2">
-            <AlertTriangle className="h-4 w-4" /> {error}
-          </p>
+          <Alert variant="destructive">
+            <AlertTitle>
+              <AlertTriangle className="h-4 w-4" /> {error}
+            </AlertTitle>
+            <Button variant="outline" size="sm" className="mt-2" onClick={fetchServing}>
+              <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+              Retry
+            </Button>
+          </Alert>
         ) : (
           <div className="space-y-4">
             <MetricExplainer />
             <GatewayCard gateway={gateway} view={gatewayView} onViewChange={setGatewayView} split={gatewaySplit} onSplitChange={setGatewaySplit} />
             {pods === null ? (
-              <div className="flex flex-col items-center justify-center py-8">
+              <div className="flex flex-col items-center justify-center py-12">
                 <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mb-2" />
                 <p className="text-sm text-muted-foreground">Probing LLM servers...</p>
+                <SkeletonRows className="mt-6 w-full max-w-md" rows={3} />
               </div>
             ) : pods.length === 0 ? (
-              <p className="text-sm text-muted-foreground py-4 text-center">
-                No LLM serving pods detected (looking for vLLM/sglang images or commands).
-              </p>
+              <EmptyState
+                icon={Server}
+                title="No LLM serving pods detected"
+                hint="Serving health is shown for pods running vLLM or sglang (detected from container images and commands). Deploy a serving workload to see inference metrics here."
+              />
             ) : (
               <>
                 <ModelUsageChart pods={pods} />

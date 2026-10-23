@@ -26,6 +26,11 @@ type Config struct {
 	// resets on process restart. If empty, it is composed from
 	// GATEWAY_HISTORY_DB_{HOST,PORT,USER,DATABASE} + GATEWAY_HISTORY_DB_PASSWORD.
 	GatewayHistoryDSN string
+	// Durable serving history: Postgres DSN for raw per-pod serving samples
+	// (7d retention by default). Empty = in-memory only (windows capped at
+	// HISTORY_WINDOW_HOURS). SERVING_HISTORY_DSN wins; otherwise the gateway
+	// DSN is reused so both histories share one CNPG instance.
+	ServingHistoryDSN string
 	// Legacy Ollama configuration (for backward compatibility)
 	OllamaURL   string
 	OllamaModel string
@@ -102,6 +107,7 @@ func Load() *Config {
 		LLMMaxTokens:         getEnvInt("LLM_MAX_TOKENS", 0),
 		LiteLLMMetricsAPIKey: getEnv("LITELLM_METRICS_API_KEY", ""),
 		GatewayHistoryDSN:    resolveGatewayHistoryDSN(),
+		ServingHistoryDSN:    resolveServingHistoryDSN(),
 		OllamaURL:            ollamaURL, // Keep for backward compatibility
 		OllamaModel:          ollamaModel,
 		AWSRegion:            getEnv("AWS_REGION", "eu-west-1"),
@@ -169,6 +175,17 @@ func resolveGatewayHistoryDSN() string {
 		u.Path = "/" + db
 	}
 	return u.String()
+}
+
+// resolveServingHistoryDSN returns the Postgres DSN for durable serving
+// history. An explicit SERVING_HISTORY_DSN wins; otherwise the gateway
+// history DSN (explicit or composed) is reused so both histories share one
+// CNPG instance. Returns "" when nothing is configured (in-memory only).
+func resolveServingHistoryDSN() string {
+	if dsn := os.Getenv("SERVING_HISTORY_DSN"); dsn != "" {
+		return dsn
+	}
+	return resolveGatewayHistoryDSN()
 }
 
 // netHost joins host and port, leaving a bare host when port is empty.

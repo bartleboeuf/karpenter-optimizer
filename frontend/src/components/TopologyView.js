@@ -6,7 +6,9 @@ import { Badge } from './ui/badge';
 import { Alert, AlertDescription, AlertTitle } from './ui/alert';
 import { Input } from './ui/input';
 import { Separator } from './ui/separator';
-import { Check, Loader2, RefreshCw } from 'lucide-react';
+import { SkeletonRows } from './ui/skeleton';
+import { EmptyState } from './ui/empty-state';
+import { Check, Loader2, RefreshCw, Network } from 'lucide-react';
 import { cn, formatGPUMem, shortGpuUuid } from '../lib/utils';
 
 const API_URL =
@@ -762,6 +764,10 @@ export default function TopologyView() {
         <Alert variant="destructive">
           <AlertTitle>Error</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
+          <Button variant="outline" size="sm" className="mt-2" onClick={fetchTopology}>
+            <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+            Retry
+          </Button>
         </Alert>
       )}
       {fallbackMode && (
@@ -776,9 +782,18 @@ export default function TopologyView() {
       )}
 
       {loading && nodes.length === 0 ? (
-        <div className="flex justify-center py-16">
-          <Loader2 className="h-10 w-10 animate-spin text-muted-foreground" />
+        <div className="flex flex-col items-center py-12">
+          <Loader2 className="h-10 w-10 animate-spin text-muted-foreground mb-4" />
+          <p className="text-sm text-muted-foreground mb-6">Loading topology...</p>
+          <SkeletonRows className="w-full max-w-md" rows={4} />
         </div>
+      ) : nodes.length === 0 ? (
+        <EmptyState
+          icon={Network}
+          title="No nodes to show"
+          hint="Topology renders once the cluster reports nodes. Check cluster connectivity, then refresh."
+          onRetry={fetchTopology}
+        />
       ) : (
         <div className="space-y-8">
           {grouped.map(([poolName, poolNodes], idx) => (

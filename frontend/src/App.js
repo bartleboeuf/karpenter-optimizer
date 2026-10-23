@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
 import { Alert, AlertTitle } from './components/ui/alert';
 import { Badge } from './components/ui/badge';
-import { Loader2, Settings, Info, X } from 'lucide-react';
+import { Loader2, Settings, Info, X, Sun, Moon, LayoutDashboard, Server, Network, Cpu, Boxes, AlertTriangle, Sparkles, FileText } from 'lucide-react';
 import './App.css';
 import NodePoolCard from './components/NodePoolCard';
 import DisruptionTracker from './components/DisruptionTracker';
@@ -14,6 +14,7 @@ import WorkloadUsageView from './components/WorkloadUsageView';
 import GlobalClusterSummary from './components/GlobalClusterSummary';
 import AgentRecommendations from './components/AgentRecommendations';
 import KarpenterLogAnalyzer from './components/KarpenterLogAnalyzer';
+import AlertsSettings from './components/AlertsSettings';
 import ServingHealth from './components/ServingHealth';
 import { cn } from './lib/utils';
 import { CurrencyRegionContext, formatCurrency } from './lib/currency';
@@ -23,6 +24,40 @@ const API_URL = (window.ENV && window.ENV.hasOwnProperty('REACT_APP_API_URL'))
   ? window.ENV.REACT_APP_API_URL 
   : (process.env.REACT_APP_API_URL || '');
 
+// Tab definitions: id, label, and icon. Order is the nav order.
+const TABS = [
+  { id: 'overview', label: 'Overview', Icon: LayoutDashboard },
+  { id: 'nodes', label: 'Nodes', Icon: Server },
+  { id: 'topology', label: 'Topology', Icon: Network },
+  { id: 'serving', label: 'Serving', Icon: Cpu },
+  { id: 'workloads', label: 'Workloads', Icon: Boxes },
+  { id: 'disruptions', label: 'Disruptions', Icon: AlertTriangle },
+  { id: 'recommendations', label: 'Recommendations', Icon: Sparkles },
+  { id: 'logs', label: 'Log Analyzer', Icon: FileText },
+];
+
+function NavItem({ id, label, Icon, active, badge, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        'flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors',
+        active
+          ? 'border-primary text-primary'
+          : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border hover:bg-muted/40'
+      )}
+    >
+      <Icon className="h-4 w-4" />
+      {label}
+      {badge > 0 && (
+        <span className="ml-0.5 rounded-full bg-destructive px-1.5 text-[10px] font-semibold leading-4 text-destructive-foreground">
+          {badge}
+        </span>
+      )}
+    </button>
+  );
+}
+
 function App() {
   const [recommendations, setRecommendations] = useState([]);
   const [showSettings, setShowSettings] = useState(false);
@@ -31,6 +66,19 @@ function App() {
   const [configLoading, setConfigLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('overview');
   const [showKarpenterBanner, setShowKarpenterBanner] = useState(true);
+  const [dark, setDark] = useState(() =>
+    document.documentElement.classList.contains('dark')
+  );
+  const [disruptionCount, setDisruptionCount] = useState(0);
+
+  const toggleTheme = () => {
+    setDark((d) => {
+      const next = !d;
+      document.documentElement.classList.toggle('dark', next);
+      localStorage.setItem('karpenter-optimizer-theme', next ? 'dark' : 'light');
+      return next;
+    });
+  };
 
   const karpenterDetected = config?.karpenter?.detected ?? false;
   const kubernetesConnected = config?.kubernetes?.connected ?? false;
@@ -41,6 +89,24 @@ function App() {
     checkHealth();
     fetchConfig();
   }, []);
+
+  // Poll the disruption summary so the Disruptions tab can show a live
+  // count badge (blocked + active). Non-fatal: a failed poll just leaves the
+  // badge at 0.
+  useEffect(() => {
+    if (!kubernetesConnected) return undefined;
+    const fetchCount = () => {
+      axios.get(`${API_URL}/api/v1/disruptions`, { params: { hours: 24 } })
+        .then((res) => {
+          const s = res.data.summary || {};
+          setDisruptionCount((s.blockedCount || 0) + (s.activeCount || 0));
+        })
+        .catch(() => setDisruptionCount(0));
+    };
+    fetchCount();
+    const interval = setInterval(fetchCount, 60000);
+    return () => clearInterval(interval);
+  }, [kubernetesConnected]);
 
   const fetchConfig = async () => {
     setConfigLoading(true);
@@ -64,16 +130,25 @@ function App() {
 
   return (
     <CurrencyRegionContext.Provider value={config?.aws?.region || ''}>
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-background">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 shadow-sm">
+      <header className="bg-card border-b border-border shadow-sm">
         <div className="max-w-7xl mx-auto px-6 py-4">
           <div className="flex justify-between items-center">
             <div>
-              <h1 className="text-2xl font-bold text-blue-600 m-0">Karpenter Optimizer</h1>
+              <h1 className="text-2xl font-bold text-primary m-0">Karpenter Optimizer</h1>
               <p className="text-sm text-muted-foreground m-0">Cluster-level cost optimization</p>
             </div>
             <div className="flex gap-2">
+              <Button
+                onClick={toggleTheme}
+                variant="outline"
+                size="icon"
+                aria-label={dark ? 'Switch to light theme' : 'Switch to dark theme'}
+                title={dark ? 'Switch to light theme' : 'Switch to dark theme'}
+              >
+                {dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </Button>
               <Button 
                 onClick={() => setShowSettings(!showSettings)}
                 variant={showSettings ? 'default' : 'outline'}
@@ -89,16 +164,16 @@ function App() {
 
       {showNoKarpenterBanner && (
         <div className="max-w-7xl mx-auto px-6 pt-4">
-          <div className="flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
-            <Info className="h-5 w-5 text-blue-600 mt-0.5 shrink-0" />
-            <p className="text-sm text-blue-800 flex-1">
+          <div className="flex items-start gap-3 rounded-lg border border-border bg-muted px-4 py-3">
+            <Info className="h-5 w-5 text-primary mt-0.5 shrink-0" />
+            <p className="text-sm text-foreground flex-1">
               Karpenter not detected — NodePool-based features are unavailable.
               Recommendations use cluster-wide analysis, and node cost is shown as "n/a".
             </p>
             <button
               type="button"
               onClick={() => setShowKarpenterBanner(false)}
-              className="shrink-0 rounded p-0.5 text-blue-600 hover:bg-blue-100"
+              className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
               aria-label="Dismiss"
             >
               <X className="h-4 w-4" />
@@ -112,98 +187,21 @@ function App() {
         {/* Minimalist Tab Navigation */}
         <div className="mb-6 border-b">
           <nav className="flex space-x-1 -mb-px">
-            <button
-              onClick={() => setActiveTab('overview')}
-              className={cn(
-                "px-4 py-2 text-sm font-medium border-b-2 transition-colors",
-                activeTab === 'overview'
-                  ? "border-blue-600 text-blue-600"
-                  : "border-transparent text-muted-foreground hover:text-foreground hover:border-gray-300"
-              )}
-            >
-              Overview
-            </button>
-            <button
-              onClick={() => setActiveTab('nodes')}
-              className={cn(
-                "px-4 py-2 text-sm font-medium border-b-2 transition-colors",
-                activeTab === 'nodes'
-                  ? "border-blue-600 text-blue-600"
-                  : "border-transparent text-muted-foreground hover:text-foreground hover:border-gray-300"
-              )}
-            >
-              Nodes
-            </button>
-            <button
-              onClick={() => setActiveTab('topology')}
-              className={cn(
-                "px-4 py-2 text-sm font-medium border-b-2 transition-colors",
-                activeTab === 'topology'
-                  ? "border-blue-600 text-blue-600"
-                  : "border-transparent text-muted-foreground hover:text-foreground hover:border-gray-300"
-              )}
-            >
-              Topology
-            </button>
-            <button
-              onClick={() => setActiveTab('serving')}
-              className={cn(
-                "px-4 py-2 text-sm font-medium border-b-2 transition-colors",
-                activeTab === 'serving'
-                  ? "border-blue-600 text-blue-600"
-                  : "border-transparent text-muted-foreground hover:text-foreground hover:border-gray-300"
-              )}
-            >
-              Serving
-            </button>
-            <button
-              onClick={() => setActiveTab('workloads')}
-              className={cn(
-                "px-4 py-2 text-sm font-medium border-b-2 transition-colors",
-                activeTab === 'workloads'
-                  ? "border-blue-600 text-blue-600"
-                  : "border-transparent text-muted-foreground hover:text-foreground hover:border-gray-300"
-              )}
-            >
-              Workloads
-            </button>
-            <button
-              onClick={() => setActiveTab('disruptions')}
-              className={cn(
-                "px-4 py-2 text-sm font-medium border-b-2 transition-colors",
-                activeTab === 'disruptions'
-                  ? "border-blue-600 text-blue-600"
-                  : "border-transparent text-muted-foreground hover:text-foreground hover:border-gray-300"
-              )}
-            >
-              Disruptions
-            </button>
-            <button
-              onClick={() => setActiveTab('recommendations')}
-              className={cn(
-                "px-4 py-2 text-sm font-medium border-b-2 transition-colors",
-                activeTab === 'recommendations'
-                  ? "border-blue-600 text-blue-600"
-                  : "border-transparent text-muted-foreground hover:text-foreground hover:border-gray-300"
-              )}
-            >
-              Recommendations
-            </button>
-            <button
-              onClick={() => setActiveTab('logs')}
-              className={cn(
-                "px-4 py-2 text-sm font-medium border-b-2 transition-colors",
-                activeTab === 'logs'
-                  ? "border-blue-600 text-blue-600"
-                  : "border-transparent text-muted-foreground hover:text-foreground hover:border-gray-300"
-              )}
-            >
-              Log Analyzer
-            </button>
+            {TABS.map(({ id, label, Icon }) => (
+              <NavItem
+                key={id}
+                id={id}
+                label={label}
+                Icon={Icon}
+                active={activeTab === id}
+                badge={id === 'disruptions' ? disruptionCount : 0}
+                onClick={() => setActiveTab(id)}
+              />
+            ))}
           </nav>
         </div>
 
-        <div className="space-y-6">
+        <div key={activeTab} className="space-y-6 animate-tab-in">
           {showSettings && (
             <Card>
               <CardHeader>
@@ -336,6 +334,9 @@ function App() {
                         </div>
                       </CardContent>
                     </Card>
+
+                    {/* Alerting (webhook/ntfy/Discord/Slack) */}
+                    <AlertsSettings />
 
                     <Alert>
                       <AlertTitle>Configuration is read from environment variables. Restart the backend server after changing environment variables.</AlertTitle>
