@@ -134,6 +134,39 @@ config:
     model: "granite4:latest"
 ```
 
+### Monitoring (Prometheus)
+
+The backend can serve Prometheus gauges at `/metrics` (opt-in). The exporter
+reads an atomic snapshot refreshed by the samplers the app already runs, so a
+scrape makes **no extra Kubernetes or AWS pricing API calls**. Off by default;
+`/metrics` 404s when disabled.
+
+```yaml
+metrics:
+  enabled: true
+serviceMonitor:            # only for the Prometheus Operator
+  enabled: true
+  interval: 30s
+```
+
+Exposed metrics (prefix `karpenter_optimizer_`): `up`,
+`kubernetes_connected`, `karpenter_detected`; cluster gauges (`cluster_nodes`,
+`cluster_pods`, `cluster_cpu_used` / `cluster_cpu_allocatable` in cores,
+`cluster_memory_used` / `cluster_memory_allocatable` in GiB,
+`cluster_cost_per_hour` in the configured region's currency,
+`cluster_power_watts`); per-NodePool `nodepool_nodes` /
+`nodepool_cost_per_hour` (`nodepool` label); serving pods
+(`serving_pod_online`, `serving_kv_cache_pct`, `serving_ttft_p95_seconds`,
+`serving_e2e_p95_seconds`, `serving_tokens_per_second`,
+`serving_requests_per_second` — labels `namespace`, `pod`, `model`); LiteLLM
+gateway (`gateway_pods`, `gateway_online`, `gateway_in_flight_requests`,
+`gateway_admission_queued`, `gateway_admission_rejected_total`,
+`gateway_error_rate_pct`, `gateway_requests_per_second`,
+`gateway_spend_total`, `gateway_app_spend_total` with an `app` label); and
+disruptions (`disruptions_active`, `disruptions_blocked`,
+`disruptions_cost_per_hour`, plus per-node `disruption_cost_per_hour` with
+`node` / `nodepool` labels).
+
 ### Configuration Parameters
 
 The following table lists the configurable parameters and their default values:
@@ -158,6 +191,15 @@ The following table lists the configurable parameters and their default values:
 | `config.ollama.url` | Ollama URL (legacy) | `""` |
 | `config.ollama.model` | Ollama model (legacy) | `granite4:latest` |
 | `config.aws.region` | AWS region | `us-east-1` |
+| `alerts.enabled` | Enable the alerting engine (evaluates conditions each sampler tick; channels via `alerts.urls` or the `/api/v1/alerts/config` API) | `false` |
+| `alerts.urls` | Comma-separated channels, each `type=url` (type one of `ntfy`/`discord`/`slack`/`webhook`; a bare URL is a webhook). URLs are secrets — keep out of values for prod | `""` |
+| `alerts.stateFile` | Where the alert state machine persists (survives restart) | `/tmp/alerts/alerts.json` |
+| `metrics.enabled` | Enable the Prometheus `/metrics` exporter (served from already-sampled data; zero extra cluster calls) | `false` |
+| `servingHistory.durable` | Enable durable serving-history storage in the shared CNPG instance (requires `database.enabled`; adds the 7d trend window). Without it, serving history is in-memory and capped at the 24h window | `false` |
+| `servingHistory.retentionHours` | Retention for raw serving samples (`SERVING_HISTORY_RETENTION_HOURS`) | `168` |
+| `serviceMonitor.enabled` | Create a Prometheus Operator `ServiceMonitor` for `/metrics` (only rendered when `metrics.enabled`) | `false` |
+| `serviceMonitor.interval` | Scrape interval | `30s` |
+| `serviceMonitor.scrapeTimeout` | Scrape timeout | `10s` |
 | `database.enabled` | Provision a CNPG `PostgresCluster` for durable LiteLLM gateway cost history (requires the CNPG operator installed). `false` = in-memory history that resets on restart | `false` |
 | `database.cluster.name` | CNPG cluster / service name (and credentials-secret name base) | `karpenter-optimizer-history` |
 | `database.cluster.postgresImage.repository` | Postgres image | `ghcr.io/cloudnative-pg/postgresql` |

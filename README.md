@@ -22,6 +22,11 @@ Karpenter Optimizer helps you optimize your Karpenter NodePool configurations by
 - 📈 **Cost Savings Analysis**: Detailed cost breakdown showing potential savings per NodePool and cluster-wide
 - 🖥️ **Modern Web UI**: React-based interface with real-time updates and progress tracking
 - 🚨 **Disruption Tracking**: Monitor Karpenter node disruptions and identify blocked deletions
+- 🔔 **Alerting Engine**: Opt-in condition monitoring (cost spike, blocked disruptions, serving under pressure, gateway errors, serving pod offline) with a pending→firing→cleared state machine and fan-out to **ntfy, Discord, Slack, or a generic JSON webhook** — all channels SSRF-validated (public http(s) only, no redirects, resolve-then-pin). Configure via the UI's Alerts settings or `GET/PUT /api/v1/alerts/config`; channel URLs are treated as credentials (masked in the API, stored in a secret/state file)
+- 📡 **Prometheus `/metrics` Exporter**: Opt-in (`METRICS_ENABLED` / `metrics.enabled`) text-0.0.4 endpoint exposing cluster, per-NodePool, serving-pod, LiteLLM gateway, and disruption gauges (`karpenter_optimizer_*`) — refreshed by the existing samplers, so a scrape makes zero extra Kubernetes or AWS Pricing API calls. Works with the chart's optional ServiceMonitor
+- 💾 **Durable Serving History**: per-pod serving samples persisted to Postgres/CNPG (same instance as the gateway cost history) when `SERVING_HISTORY_DSN` (or `GATEWAY_HISTORY_DB_*`) is set — the Serving tab's trend window gains **7d** alongside 1h/6h/24h, surviving restarts; without a DSN it stays in-memory as before
+- 🌗 **Dark/Light Theme**: sun/moon toggle in the header (persisted, defaults to system preference, no flash on first paint) — every view, chart, and table is themed through semantic tokens
+- 🖼️ **Polished UI States**: consistent empty-state cards with retry actions, loading skeletons that avoid layout shift, and error banners with retry across every tab
 - 🔍 **Karpenter Log Analyzer**: Analyze Karpenter error logs with AI-powered explanations and actionable recommendations
 - 🎮 **GPU Allocation Visualization**: See GPU count, memory, and allocation per node, pod, and cluster (allocation-based, no DCGM/Prometheus). GPU count/memory read from node labels (`nvidia.com/gpu.count`, `nvidia.com/gpu.memory`); HAMi/KAI memory partitioning aware (`nvidia.com/gpumem` + `hami.io/vgpu-devices-allocated`) — when HAMi is detected, GPU usage is reported as **memory % in use** plus a **GPU pod** count (fractional-GPU friendly)
 - 🤖 **LLM Serving Health**: A "Serving" tab probes in-cluster vLLM/sglang pods to show inference health — model, KV cache %, running/waiting, TTFT (mean/p95), end-to-end latency (mean/p95), preemptions, token throughput, and request rate. Each card shows a one-glance status (OK/Busy/Slow/Under pressure) with fix hints, where the model runs (node, instance type, GPU model, and the specific GPU card UUID on HAMi/KAI clusters), a "Model usage" chart that ranks models by throughput, and collapsible per-metric trend sparklines (1h/6h/24h) with a "last issue seen" marker for historical traceability
@@ -58,7 +63,27 @@ Karpenter Optimizer helps you optimize your Karpenter NodePool configurations by
 
 *Monitor Karpenter node disruptions and identify blocked deletions with PDB visibility*
 
-Auto-refreshes every 60s (toggleable) with a 1h/6h/24h/7d window selector. Shows how much a stuck node is still costing (`$X/hr`, spot-aware) plus a cluster-level "still billed" summary, and lists recently-terminated nodes from the `disruptions/recent` endpoint. Node/PDB/pod names are click-to-copy.
+Auto-refreshes every 60s (toggleable). Shows how much a stuck node is still costing (`$X/hr`, spot-aware) plus a cluster-level "still billed" summary, and lists recently-terminated nodes from the `disruptions/recent` endpoint. Node/PDB/pod names are click-to-copy.
+
+### Topology (GPU lanes)
+![Topology GPU](docs/images/topologyGpu.png)
+
+*Pod-on-node topology with per-GPU placement lanes under HAMi — each physical card gets its own memory lane*
+
+### LLM Serving Health
+![Serving Health](docs/images/servingHealth.png)
+
+*Inference health per vLLM/sglang pod (status badge, KV cache, TTFT/E2E, throughput) plus the LiteLLM Gateway card with spend/token breakdowns and a usage-by-day dashboard (1h/6h/24h/7d trends)*
+
+### Dark Theme
+![Serving Health (dark)](docs/images/servingDark.png)
+
+*The same Serving view in dark mode — the theme toggle (header) is persisted and defaults to your system preference*
+
+### Alerting Settings
+![Alerts Settings](docs/images/alertsConfig.png)
+
+*Opt-in alerting: cost spikes, blocked disruptions, serving under pressure, gateway errors, and offline pods → ntfy / Discord / Slack / webhook (SSRF-validated, URLs masked)*
 
 ## Architecture
 
@@ -172,6 +197,10 @@ The API will be available at `http://localhost:8080` and the frontend at `http:/
 - `LITELLM_METRICS_API_KEY`: Bearer token for the LiteLLM proxy `/metrics` endpoint (optional; required by LiteLLM ≥ v1.85.0). When the gateway's metrics endpoint answers 401/403, the Serving tab shows an actionable hint pointing at this variable
 - `GATEWAY_HISTORY_DSN`: Postgres DSN for durable LiteLLM gateway cost history (e.g. a CNPG cluster; optional). Empty = an in-memory history that resets on restart. Alternatively set `GATEWAY_HISTORY_DB_HOST` / `PORT` / `USER` / `NAME` + `GATEWAY_HISTORY_DB_PASSWORD` and the DSN is composed for you (the Helm chart uses this so the password comes from the CNPG credentials secret)
 - `GATEWAY_HISTORY_RETENTION_HOURS`: how long to keep gateway cost history (default: 720 = 30 days)
+- `SERVING_HISTORY_DSN`: Postgres DSN for durable serving-history samples (optional). Empty = in-memory only (trend windows capped at `HISTORY_WINDOW_HOURS`). When set, the Serving tab's trend selector gains a **7d** option and history survives restarts. Reuses the gateway's `GATEWAY_HISTORY_DB_*` parts when no explicit DSN is set, so both histories can share one CNPG instance
+- `SERVING_HISTORY_RETENTION_HOURS`: how long to keep durable serving samples (default: 168 = 7 days)
+- `METRICS_ENABLED`: enable the Prometheus `/metrics` exporter (`true`/`1`, default off → `/metrics` 404s). Chart value: `metrics.enabled`
+- Alerting is configured at runtime via the UI or `GET/PUT /api/v1/alerts/config` (persisted to `alerts.stateFile`), or chart values `alerts.enabled` / `alerts.urls` (comma-separated `type=url` channel entries — keep secrets out of git in prod)
 
 **Pricing note:** Cost estimates use live AWS Pricing API results when available. Instance-type discovery filters AWS Pricing index entries to the configured region and uses AWS `processorArchitecture` metadata to distinguish ARM from x86 types. Dated fallback snapshots queried 2026-10-19 are available for selected `us-east-1` USD and China-region CNY instance types; they may become stale and should be refreshed periodically. Snapshots are only used when pricing cannot be queried, and not when the Pricing API explicitly returns no product. The US snapshot is not reused for other commercial regions. Spot pricing is an estimate based on a fixed discount from on-demand pricing, not a live Spot market quote.
 
@@ -266,11 +295,15 @@ make swagger
 - `GET /api/v1/topology` - Get nodes with scheduled pods and per-pod requests (topology view)
 - `GET /api/v1/cluster/summary` - Get cluster-wide statistics
 - `GET /api/v1/serving` - Inference health for detected vLLM/sglang serving pods (model, KV cache %, running/waiting, TTFT, E2E latency, preemptions, throughput, request rate, node/GPU placement)
-- `GET /api/v1/serving/history?window=6h` - Per-pod serving metric trends (sampled every 60s, in-memory) + last time each pod was unhealthy
+- `GET /api/v1/serving/history?window=6h` - Per-pod serving metric trends (sampled every 60s) + last time each pod was unhealthy; in-memory by default, durable Postgres/CNPG when `SERVING_HISTORY_DSN` is set (adds a `7d` window)
 - `GET /api/v1/serving/gateway` - LiteLLM AI-gateway health: fleet-wide in-flight/queue/503/error/latency (E2E + overhead p95)/spend + usage breakdowns split by **app / API key / team** (`metadata_trace_name` / `api_key_alias` / `team_alias`), each with per-model detail (tokens split input/output); `null` when no LiteLLM proxy is detected
 - `GET /api/v1/serving/gateway/history?split=app&window=14d` - Per-day LiteLLM gateway cost & token usage by split dimension (or fleet total); in-memory by default, durable CNPG Postgres when enabled
 - `GET /api/v1/disruptions` - Get node disruption information
 - `GET /api/v1/disruptions/recent` - Get recent node deletions
+- `GET /api/v1/alerts/config` - Alerting config (channel URLs masked); 503 when alerts are not configured
+- `PUT /api/v1/alerts/config` - Replace the alerting config (conditions, reminder interval, channels); masked URLs are preserved
+- `POST /api/v1/alerts/test` - Send a test alert through every configured channel
+- `GET /metrics` - Prometheus text-0.0.4 gauges (only when `METRICS_ENABLED=true`; 404 otherwise)
 
 For complete API documentation with request/response schemas, see the [Swagger UI](http://localhost:8080/api/swagger/index.html) or generate the docs with `make swagger`.
 

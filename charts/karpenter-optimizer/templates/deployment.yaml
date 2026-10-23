@@ -106,6 +106,26 @@ spec:
                   key: password
             - name: GATEWAY_HISTORY_RETENTION_HOURS
               value: {{ .Values.database.cluster.retentionHours | quote }}
+            {{- if .Values.servingHistory.durable }}
+            - name: SERVING_HISTORY_RETENTION_HOURS
+              value: {{ .Values.servingHistory.retentionHours | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.alerts.enabled }}
+            # Alerting engine (opt-in).
+            - name: ALERTS_ENABLED
+              value: "true"
+            {{- if .Values.alerts.urls }}
+            - name: ALERTS_URLS
+              value: {{ .Values.alerts.urls | quote }}
+            {{- end }}
+            - name: ALERTS_STATE_FILE
+              value: {{ .Values.alerts.stateFile | quote }}
+            {{- end }}
+            {{- if .Values.metrics.enabled }}
+            # Prometheus /metrics exporter (opt-in).
+            - name: METRICS_ENABLED
+              value: "true"
             {{- end }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
@@ -128,10 +148,14 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- with .Values.volumeMounts }}
           volumeMounts:
+            {{- if .Values.alerts.enabled }}
+            - name: alerts-state
+              mountPath: /tmp/alerts
+            {{- end }}
+            {{- with .Values.volumeMounts }}
             {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- end }}
         {{- if .Values.frontend.enabled }}
         - name: frontend
           image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag | default .Chart.AppVersion }}"
@@ -165,6 +189,10 @@ spec:
       volumes:
         {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.alerts.enabled }}
+        - name: alerts-state
+          emptyDir: {}
         {{- end }}
         {{- if and .Values.frontend.enabled .Values.frontend.nginxConfig }}
         - name: nginx-config

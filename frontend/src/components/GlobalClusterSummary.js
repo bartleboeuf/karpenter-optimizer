@@ -7,8 +7,10 @@ import { Progress } from './ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Switch } from './ui/switch';
 import { Badge } from './ui/badge';
+import { Skeleton } from './ui/skeleton';
+import { EmptyState } from './ui/empty-state';
 import Sparkline from './Sparkline';
-import { RefreshCw, Zap, Loader2 } from 'lucide-react';
+import { RefreshCw, Zap, Loader2, LayoutDashboard } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { getCacheStats } from '../lib/pricingCache';
 import { useCurrencyFormatter } from '../lib/currency';
@@ -286,6 +288,13 @@ function GlobalClusterSummary({ onRecommendationsGenerated, onClusterCostUpdate 
             <AlertTitle>Error</AlertTitle>
             <AlertDescription>{error}</AlertDescription>
           </Alert>
+          <EmptyState
+            className="mt-4 border-0"
+            icon={LayoutDashboard}
+            title="Couldn't load the cluster summary"
+            hint="The cluster may be unreachable, or the API may be temporarily unavailable."
+            onRetry={fetchSummary}
+          />
         </CardContent>
       </Card>
     );
@@ -296,12 +305,24 @@ function GlobalClusterSummary({ onRecommendationsGenerated, onClusterCostUpdate 
       <Card>
         <CardContent className="pt-6">
           {loading ? (
-            <div className="flex flex-col items-center justify-center py-8">
-              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground mb-2" />
-              <p className="text-sm text-muted-foreground">Loading cluster summary...</p>
+            <div className="space-y-4 py-4">
+              <div className="flex items-center justify-center gap-3">
+                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                <p className="text-sm text-muted-foreground">Loading cluster summary...</p>
+              </div>
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <Skeleton key={i} className="h-20 w-full" />
+                ))}
+              </div>
             </div>
           ) : (
-            <p className="text-center text-muted-foreground py-8">No cluster data available</p>
+            <EmptyState
+              icon={LayoutDashboard}
+              title="No cluster data available"
+              hint="Cluster statistics appear here once nodes are reported."
+              onRetry={fetchSummary}
+            />
           )}
         </CardContent>
       </Card>
@@ -349,7 +370,7 @@ function GlobalClusterSummary({ onRecommendationsGenerated, onClusterCostUpdate 
               onClick={handleGenerateRecommendations}
               disabled={!summary || generatingRecommendations}
               size="lg"
-              className="bg-white text-purple-600 hover:bg-white/90 font-bold min-w-[250px]"
+              className="bg-card text-purple-600 hover:bg-accent font-bold min-w-[250px]"
             >
               <Zap className="h-5 w-5 mr-2" />
               Generate Recommendations
@@ -430,17 +451,17 @@ function GlobalClusterSummary({ onRecommendationsGenerated, onClusterCostUpdate 
 
             {(summary.estimatedCost !== undefined && summary.estimatedCost > 0) || summary.costUnknown === true ? (
               summary.costUnknown === true ? (
-                <Card className="bg-gray-50 border-gray-200">
+                <Card className="bg-muted/40 border-border">
                   <CardContent className="pt-6">
                     <p className="text-sm text-muted-foreground">Estimated Cost</p>
-                    <p className="text-2xl font-bold text-gray-500">n/a</p>
+                    <p className="text-2xl font-bold text-muted-foreground">n/a</p>
                     <p className="text-xs text-muted-foreground mt-1">
                       No instance-type metadata (on-prem)
                     </p>
                   </CardContent>
                 </Card>
               ) : (
-              <Card className="bg-green-50 border-green-200">
+              <Card className="bg-green-50 border-green-200 dark:bg-green-950/40 dark:border-green-500/30">
                 <CardContent className="pt-6">
                   <p className="text-sm text-muted-foreground">Estimated Cost</p>
                   <p className="text-2xl font-bold text-green-600">
@@ -474,7 +495,7 @@ function GlobalClusterSummary({ onRecommendationsGenerated, onClusterCostUpdate 
               )
             ) : null}
 
-            <Card className="bg-yellow-50 border-yellow-200">
+            <Card className="bg-yellow-50 border-yellow-200 dark:bg-yellow-950/40 dark:border-yellow-500/30">
               <CardContent className="pt-6">
                 <p className="text-sm text-muted-foreground">Spot Instances</p>
                 <p className="text-2xl font-bold text-yellow-600">{summary.spotNodes}</p>
@@ -486,10 +507,10 @@ function GlobalClusterSummary({ onRecommendationsGenerated, onClusterCostUpdate 
               </CardContent>
             </Card>
 
-            <Card className="bg-blue-50 border-blue-200">
+            <Card className="bg-muted/40 border-border">
               <CardContent className="pt-6">
                 <p className="text-sm text-muted-foreground">On-Demand Instances</p>
-                <p className="text-2xl font-bold text-blue-600">{summary.onDemandNodes}</p>
+                <p className="text-2xl font-bold text-primary">{summary.onDemandNodes}</p>
                 {summary.totalNodes > 0 && (
                   <p className="text-xs text-muted-foreground mt-1">
                     ({((summary.onDemandNodes / summary.totalNodes) * 100).toFixed(1)}%)
@@ -535,7 +556,7 @@ function GlobalClusterSummary({ onRecommendationsGenerated, onClusterCostUpdate 
             </Card>
 
             {summary.power && summary.power.nodeCount > 0 && (
-              <Card className="bg-amber-50 border-amber-200" title="Estimated from a static wattage table per instance family. Nodes with unknown instance families are excluded from the total (see coverage).">
+              <Card className="bg-amber-50 border-amber-200 dark:bg-amber-950/40 dark:border-amber-500/30" title="Estimated from a static wattage table per instance family. Nodes with unknown instance families are excluded from the total (see coverage).">
                 <CardContent className="pt-6">
                   <p className="text-sm text-muted-foreground">Est. Power</p>
                   <p className="text-2xl font-bold text-amber-600">
@@ -577,7 +598,7 @@ function GlobalClusterSummary({ onRecommendationsGenerated, onClusterCostUpdate 
                         </CardContent>
                       </Card>
                     ) : (
-                      <Card className="bg-purple-50 border-purple-200">
+                      <Card className="bg-purple-500/10 border-purple-500/20">
                         <CardContent className="pt-6">
                           <p className="text-sm text-muted-foreground">In Use</p>
                           <p className="text-2xl font-bold text-purple-600">
@@ -587,7 +608,7 @@ function GlobalClusterSummary({ onRecommendationsGenerated, onClusterCostUpdate 
                       </Card>
                     )}
                     {hami ? (
-                      <Card className="bg-green-50 border-green-200">
+                      <Card className="bg-green-50 border-green-200 dark:bg-green-950/40 dark:border-green-500/30">
                         <CardContent className="pt-6">
                           <p className="text-sm text-muted-foreground">GPU Pods</p>
                           <p className="text-2xl font-bold text-green-600">{summary.gpu.podsWithGPU || 0}</p>
@@ -595,7 +616,7 @@ function GlobalClusterSummary({ onRecommendationsGenerated, onClusterCostUpdate 
                         </CardContent>
                       </Card>
                     ) : (
-                      <Card className="bg-green-50 border-green-200">
+                      <Card className="bg-green-50 border-green-200 dark:bg-green-950/40 dark:border-green-500/30">
                         <CardContent className="pt-6">
                           <p className="text-sm text-muted-foreground">Free</p>
                           <p className="text-2xl font-bold text-green-600">{summary.gpu.free}</p>

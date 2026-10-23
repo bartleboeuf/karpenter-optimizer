@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/karpenter-optimizer/internal/servingdurable"
 	"github.com/karpenter-optimizer/internal/servinghistory"
 )
 
@@ -49,6 +50,10 @@ func (s *Server) sampleServing() {
 		debugLog(s.config.Debug, "serving sampler: failed to probe pods: %v\n", err)
 		return
 	}
+	// Publish the same probe results to the /metrics snapshot (no-op when disabled).
+	s.recordServingMetrics(health)
+	// Append the same samples to the durable store (no-op when not configured).
+	s.appendServingDurable(health)
 	for _, h := range health {
 		s.servingHistoryStore.Add(h.Namespace, h.Name, servinghistory.Point{
 			T:              time.Now().Format(time.RFC3339),
@@ -72,10 +77,23 @@ func (s *Server) sampleServing() {
 // requested window (e.g. ?window=6h), plus the last time each known pod was
 // observed unhealthy. Defaults to 6h, capped at 24h.
 func (s *Server) getServingHistory(c *gin.Context) {
-	window := parseHistoryWindow(c.Query("window"))
+	durable := s.servingDurableStore != nil
+	window := parseServingHistoryWindow(c.Query("window"), durable)
 
 	kvThreshold := 85.0
+	durableRows, podsFromDurable := s.durableServingSeries(window)
 	pods := s.servingHistoryStore.Pods()
+	if len(podsFromDurable) > 0 {
+		known := make(map[string]bool, len(pods))
+		for _, k := range pods {
+			known[k] = true
+		}
+		for k := range podsFromDurable {
+			if !known[k] {
+				pods = append(pods, k)
+			}
+		}
+	}
 	out := make([]servingHistoryEntry, 0, len(pods))
 	for _, k := range pods {
 		var namespace, name string
@@ -85,12 +103,18 @@ func (s *Server) getServingHistory(c *gin.Context) {
 		} else {
 			name = k
 		}
+		var points []servinghistory.Point
+		if durable {
+			points = mergeServingHistory(durableRows[k], s.servingHistoryStore.Series(namespace, name, window), time.Now().Add(-window))
+		} else {
+			points = s.servingHistoryStore.Series(namespace, name, window)
+		}
 		out = append(out, servingHistoryEntry{
 			Namespace: namespace,
 			Name:      name,
 			Window:    window.String(),
-			Points:    s.servingHistoryStore.Series(namespace, name, window),
-			LastIssue: s.servingHistoryStore.LastIssue(namespace, name, window, kvThreshold),
+			Points:    points,
+			LastIssue: lastIssueFromSeries(points, kvThreshold),
 		})
 	}
 
@@ -98,6 +122,41 @@ func (s *Server) getServingHistory(c *gin.Context) {
 		"window": window.String(),
 		"pods":   out,
 	})
+}
+
+// durableServingSeries fetches the durable store's rows for the window (nil
+// maps when the store is off or the query fails — callers fall back to the
+// in-memory series).
+func (s *Server) durableServingSeries(window time.Duration) (map[string][]servingdurable.Point, map[string]bool) {
+	if s.servingDurableStore == nil {
+		return nil, nil
+	}
+	rows, err := s.servingDurableStore.Query(time.Now().Add(-window))
+	if err != nil {
+		debugLog(s.config.Debug, "serving durable history: query: %v\n", err)
+		return nil, nil
+	}
+	pods := make(map[string]bool, len(rows))
+	for k := range rows {
+		pods[k] = true
+	}
+	return rows, pods
+}
+
+// lastIssueFromSeries is the merged-series equivalent of
+// servinghistory.Store.LastIssue (offline / waiting / preemptions / KV≥thr).
+func lastIssueFromSeries(pts []servinghistory.Point, kvThresholdPct float64) int64 {
+	var last int64
+	for _, p := range pts {
+		unhealthy := !p.Online || p.Waiting > 0 || p.Preemptions > 0
+		if !unhealthy && p.KVCachePercent != nil && *p.KVCachePercent >= kvThresholdPct {
+			unhealthy = true
+		}
+		if unhealthy && p.Unix > last {
+			last = p.Unix
+		}
+	}
+	return last
 }
 
 type servingHistoryEntry struct {

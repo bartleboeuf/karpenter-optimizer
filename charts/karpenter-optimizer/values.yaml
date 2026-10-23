@@ -162,6 +162,24 @@ config:
   port: 8080
   logLevel: "info"
 
+# Alerting engine (opt-in). When enabled, the backend evaluates a set of
+# conditions on each sampler tick and delivers new alerts to the configured
+# channels (ntfy / Discord / Slack / generic webhook). All channels are
+# SSRF-validated (public http(s) only, no redirects, resolve-then-pin).
+#
+# Channels are provided two ways (chart env, or the /api/v1/alerts/config API):
+#   - urls: a comma-separated list of "type=url" entries (type one of
+#     ntfy/discord/slack/webhook; a bare URL is treated as a webhook). URLs are
+#     secrets — put them in .Values.env or a secret, not here, for prod.
+#   - stateFile: where the engine persists its firing state (survives restart).
+alerts:
+  enabled: false
+  # Example: "ntfy=https://ntfy.sh/my-topic,slack=https://hooks.slack.com/..."
+  urls: ""
+  # Where the engine persists its state machine. The chart mounts a writable
+  # emptyDir at /tmp/alerts when alerts are enabled, so the default lives there.
+  stateFile: /tmp/alerts/alerts.json
+
 # LiteLLM gateway cost history (per-day spend/token by app/API key/team).
 # When database.enabled is true the chart provisions a small CNPG
 # (CloudNativePG) PostgresCluster and points the app at it, so cost history is
@@ -195,6 +213,16 @@ database:
       limits:
         memory: 512Mi
 
+# Durable serving history (raw per-pod serving samples, 7d window). Reuses the
+# same CNPG instance as the gateway cost history when database.enabled is true;
+# otherwise set SERVING_HISTORY_DSN via env. When no DSN is available the
+# in-memory store serves the short windows (capped at HISTORY_WINDOW_HOURS) and
+# the "7d" trend option is unavailable.
+servingHistory:
+  durable: false
+  # Retention for raw serving samples (hours). 168 = 7 days.
+  retentionHours: 168
+
 # Environment variables
 env: []
   # - name: CUSTOM_VAR
@@ -223,6 +251,13 @@ serviceMonitor:
   interval: 30s
   scrapeTimeout: 10s
   labels: {}
+
+# Prometheus /metrics exporter (opt-in). When enabled, the backend serves
+# cluster/NodePool/serving/gateway/disruption gauges at /metrics from the
+# data it already samples (a scrape makes no extra Kubernetes calls). The
+# ServiceMonitor above scrapes that path when both are enabled.
+metrics:
+  enabled: false
 
 # Frontend configuration (deployed as sidecar container)
 frontend:

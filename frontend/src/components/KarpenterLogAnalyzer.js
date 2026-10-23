@@ -6,8 +6,9 @@ import { Alert, AlertDescription, AlertTitle } from './ui/alert';
 import { Badge } from './ui/badge';
 import { Textarea } from './ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Loader2, AlertTriangle, CheckCircle, Info, AlertCircle, RefreshCw } from 'lucide-react';
+import { Loader2, AlertTriangle, CheckCircle, Info, AlertCircle, RefreshCw, FileText } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { EmptyState } from './ui/empty-state';
 
 const API_URL = (window.ENV && window.ENV.hasOwnProperty('REACT_APP_API_URL')) 
   ? window.ENV.REACT_APP_API_URL 
@@ -132,11 +133,11 @@ function KarpenterLogAnalyzer() {
   const getSeverityColor = (severity) => {
     switch (severity) {
       case 'critical':
-        return 'bg-red-100 text-red-800 border-red-300';
+        return 'bg-red-100 text-red-800 border-red-300 dark:bg-red-500/20 dark:text-red-300 dark:border-red-500/40';
       case 'warning':
-        return 'bg-yellow-100 text-yellow-800 border-yellow-300';
+        return 'bg-yellow-100 text-yellow-800 border-yellow-300 dark:bg-yellow-500/20 dark:text-yellow-300 dark:border-yellow-500/40';
       default:
-        return 'bg-blue-100 text-blue-800 border-blue-300';
+        return 'bg-blue-100 text-blue-800 border-blue-300 dark:bg-blue-500/20 dark:text-blue-300 dark:border-blue-500/40';
     }
   };
 
@@ -193,6 +194,14 @@ function KarpenterLogAnalyzer() {
                 ))}
               </SelectContent>
             </Select>
+            {!loadingPods && karpenterPods.length === 0 && !error && (
+              <EmptyState
+                icon={FileText}
+                title="No Karpenter pods found"
+                hint="Install Karpenter in the cluster to enable error log analysis."
+                className="py-8"
+              />
+            )}
           </div>
 
           {/* Error Logs Selection */}
